@@ -1,0 +1,104 @@
+name: healthsync-uganda
+
+# Two deployment shapes are supported:
+#
+#   • Full stack: `docker compose up --build`
+#     Postgres, Redis, OTel collector, backend, frontend — all in-network.
+#     URLs below resolve via Compose DNS (postgres, redis, backend).
+#
+#   • Local dev stack (Postgres + Redis only): `scripts/dev-stack.sh`
+#     Brings up just `postgres` and `redis`, then you run uv + bun directly
+#     on the host. The .env URLs point at localhost in that case.
+#
+# Override URLs for production by exporting them in the deploying shell —
+# Compose `environment:` precedence beats `.env`.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-healthsync}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-healthsync}
+      POSTGRES_DB: ${POSTGRES_DB:-healthsync}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "6379:6379"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.108.0
+    restart: unless-stopped
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./infra/otel/config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    profiles: ["full", "observability"]
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Override in-container hostnames — Compose DNS resolves these names.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-healthsync}:${POSTGRES_PASSWORD:-healthsync}@postgres:5432/${POSTGRES_DB:-healthsync}
+      REDIS_URL: redis://redis:6379/0
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # Mocks live in this same backend process. Override these to real
+      # NIRA / DHIS2 URLs in production.
+      NIRA_BASE_URL: http://backend:8000/api/v1/interop/mock/nira
+      DHIS2_BASE_URL: http://backend:8000/api/v1/interop/mock/dhis2
+      CORS_ALLOW_ORIGINS: '["http://localhost:3000"]'
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    profiles: ["full"]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    depends_on:
+      backend: { condition: service_healthy }
+    ports:
+      - "3000:3000"
+    profiles: ["full"]
+
+volumes:
+  postgres_data:
+  redis_data:
