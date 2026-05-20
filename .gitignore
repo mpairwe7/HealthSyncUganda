@@ -24,6 +24,7 @@ out/
 dist/
 .turbo/
 bun.lockb.bak
+tsconfig.tsbuildinfo
 
 # Env
 .env

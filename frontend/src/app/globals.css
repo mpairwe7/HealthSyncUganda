@@ -2,77 +2,183 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Design tokens — see docs/DESIGN_SYSTEM.md for the rationale.
+ * Colour values are stored as HSL triplets so shadcn primitives keep working,
+ * and as raw HEX in --brand-* mirrors for components that need exact hue control.
+ */
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    /* ── Brand mirrors (raw HEX) ─────────────────────────────────────────── */
+    --brand-primary-hex: #0F5132;
+    --brand-primary-700-hex: #0A3D26;
+    --brand-primary-100-hex: #D7EAE0;
+    --brand-accent-hex: #C5A572;
+    --brand-deep-hex: #0B1F33;
+
+    /* ── HSL bridge (shadcn-compatible) ──────────────────────────────────── */
+    --background: 0 0% 100%;                /* --surface-0 */
+    --foreground: 120 17% 7%;               /* --surface-900 */
 
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card-foreground: 120 17% 7%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
+    --popover-foreground: 120 17% 7%;
 
-    --primary: 145 65% 35%;        /* clinical green */
+    --primary: 152 69% 19%;                 /* deep green #0F5132 */
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 90 8% 95%;                 /* surface-50, off-white worker bg */
+    --secondary-foreground: 120 17% 7%;
 
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    --muted: 100 9% 93%;                    /* surface-100 */
+    --muted-foreground: 110 4% 27%;         /* surface-700 */
 
-    --accent: 145 65% 92%;
-    --accent-foreground: 145 65% 18%;
+    --accent: 148 31% 88%;                  /* brand-primary-100 — soft tints */
+    --accent-foreground: 152 69% 14%;       /* darker green for legibility */
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 0 70% 36%;               /* state-danger #9B1C1C */
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 145 65% 35%;
+    --border: 90 4% 86%;                    /* surface-200 */
+    --input: 90 4% 86%;
+    --ring: 152 69% 19%;
 
-    --radius: 0.5rem;
+    /* ── Semantic state ──────────────────────────────────────────────────── */
+    --state-success: 152 47% 33%;           /* #2E7D5A */
+    --state-success-100: 148 31% 91%;
+    --state-info: 207 70% 41%;              /* #1F6FB2 */
+    --state-info-100: 207 60% 93%;
+    --state-warning: 26 73% 41%;            /* #B5651D */
+    --state-warning-100: 30 78% 92%;
+    --state-danger: 0 70% 36%;              /* #9B1C1C */
+    --state-danger-100: 0 60% 95%;
+    --state-neutral: 100 5% 36%;            /* #586256 */
+
+    /* ── Honour accent (citizen-facing surfaces only) ─────────────────────── */
+    --brand-accent: 37 42% 61%;             /* #C5A572 */
+    --brand-accent-foreground: 30 50% 18%;
+
+    /* ── Admin / ministry chrome ─────────────────────────────────────────── */
+    --brand-deep: 210 65% 12%;              /* #0B1F33 */
+    --brand-deep-foreground: 90 8% 95%;
+
+    /* ── Geometry ────────────────────────────────────────────────────────── */
+    --radius: 0.625rem;                     /* 10px — radius-md */
+    --row-height: 56px;                     /* Comfort density default */
+    --shadow-1: 0 1px 2px rgba(14, 20, 16, 0.06);
+    --shadow-2: 0 4px 12px rgba(14, 20, 16, 0.08);
+
+    /* ── Type ────────────────────────────────────────────────────────────── */
+    --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system,
+      "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular,
+      "JetBrains Mono", Menlo, monospace;
   }
 
-  .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 145 65% 50%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 145 65% 50%;
+  .dark,
+  .density-admin {
+    /* Calm dark theme for ministry/admin operations rooms */
+    --background: 210 65% 12%;              /* brand-deep */
+    --foreground: 120 14% 92%;
+    --card: 210 50% 15%;
+    --card-foreground: 120 14% 92%;
+    --popover: 210 50% 15%;
+    --popover-foreground: 120 14% 92%;
+    --primary: 145 35% 53%;                 /* lifted green that meets contrast */
+    --primary-foreground: 210 65% 8%;
+    --secondary: 210 35% 18%;
+    --secondary-foreground: 120 14% 92%;
+    --muted: 210 35% 18%;
+    --muted-foreground: 120 8% 70%;
+    --accent: 210 40% 22%;
+    --accent-foreground: 120 14% 95%;
+    --destructive: 0 55% 45%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 210 25% 25%;
+    --input: 210 25% 25%;
+    --ring: 145 35% 53%;
+  }
+
+  .density-compact {
+    --row-height: 40px;
   }
 }
 
 @layer base {
   * { @apply border-border; }
+  html { -webkit-tap-highlight-color: transparent; }
   body {
     @apply bg-background text-foreground antialiased;
-    font-feature-settings: "rlig" 1, "calt" 1;
+    font-family: var(--font-sans);
+    font-feature-settings: "rlig" 1, "calt" 1, "ss01" 1;
+    text-rendering: optimizeLegibility;
+  }
+
+  /*
+   * Clinical text — drug names, dosages, allergies — meets 7:1 contrast
+   * (WCAG 2.2 AAA §1.4.6) on light surfaces.
+   */
+  .clinical-text {
+    color: hsl(120 17% 7%);
+    font-weight: 600;
+  }
+
+  /* Tabular numerals everywhere a number appears in a table or stat. */
+  .nums, table, th, td {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Long-form reading caps line length per §2.3 of DESIGN_SYSTEM.md. */
+  .prose-clinical {
+    max-width: 70ch;
+    line-height: 1.55;
+  }
+
+  /*
+   * Focus ring — always visible. Clinicians wear gloves and use keyboards;
+   * :focus-visible alone hides the affordance from too many users.
+   */
+  :focus { outline: none; }
+  :focus-visible,
+  :where(button, a, input, select, textarea, [tabindex]):focus {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px hsl(var(--background));
+  }
+
+  /* Respect Save-Data and reduced-motion preferences. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
   }
 }
 
 /* Skeletal "loading" shimmer used by Server Component fallbacks */
 .shimmer {
-  background: linear-gradient(90deg, hsl(var(--muted)) 25%, hsl(var(--accent)) 50%, hsl(var(--muted)) 75%);
+  background: linear-gradient(
+    90deg,
+    hsl(var(--muted)) 25%,
+    hsl(var(--accent)) 50%,
+    hsl(var(--muted)) 75%
+  );
   background-size: 200% 100%;
   animation: shimmer 1.4s infinite linear;
 }
 @keyframes shimmer {
   0% { background-position: -200% 0; }
   100% { background-position: 200% 0; }
+}
+
+/* Print stylesheet — referrals + discharge summaries on A4 */
+@media print {
+  body { background: white; }
+  header, nav, [data-no-print] { display: none !important; }
+  main { padding: 0 !important; }
+  .clinical-text { color: black !important; }
 }
