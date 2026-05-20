@@ -16,7 +16,7 @@ dependencies = [
     "pydantic-settings>=2.6.0",
     "email-validator>=2.2.0",
     # Database
-    "sqlalchemy[asyncio]>=2.0.36",
+    "sqlalchemy[asyncio]>=2.0.49",
     "asyncpg>=0.30.0",
     "aiosqlite>=0.20.0",          # fallback for laptop demos w/o postgres
     "alembic>=1.13.0",
