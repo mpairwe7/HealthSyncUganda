@@ -5,12 +5,13 @@ Lifespan boots: logging → telemetry → DB schema (dev) → Redis ping → see
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, AsyncIterator
+from typing import Annotated
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_v1_router
 from app.config import Settings, get_settings
@@ -18,7 +19,7 @@ from app.core.logging import configure_logging, get_logger
 from app.core.redis_client import close_redis, get_redis
 from app.core.telemetry import setup_telemetry
 from app.db.base import Base
-from app.db.models import *  # noqa: F401, F403  — register models
+from app.db.models import *  # noqa: F403  — register models
 from app.db.session import dispose_engine, get_engine
 from app.fhir.endpoints import fhir_router
 from app.middleware.audit_context import AuditContextMiddleware
@@ -47,7 +48,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         redis = await get_redis()
         await redis.ping()
         logger.info("redis_ready", url=settings.redis_url)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if settings.is_production:
             logger.error(
                 "redis_unavailable",
@@ -83,7 +84,6 @@ def create_app() -> FastAPI:
             "Interoperable National Digital Health Platform — patient records, "
             "supply-chain visibility, FHIR R4 exchange."
         ),
-        default_response_class=ORJSONResponse,
         lifespan=lifespan,
         docs_url="/docs",
         redoc_url="/redoc",
@@ -111,7 +111,7 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/readyz", include_in_schema=False, tags=["health"])
-    async def readyz() -> ORJSONResponse:
+    async def readyz() -> JSONResponse:
         """Readiness — Redis + DB are reachable.
 
         Returns 200 when both are healthy, 503 with a structured body when
@@ -125,7 +125,7 @@ def create_app() -> FastAPI:
             redis = await get_redis()
             await redis.ping()
             checks["redis"] = "ok"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             checks["redis"] = f"down: {exc}"
             ok = False
 
@@ -135,12 +135,12 @@ def create_app() -> FastAPI:
             async with get_engine().connect() as conn:
                 await conn.execute(text("SELECT 1"))
             checks["database"] = "ok"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             checks["database"] = f"down: {exc}"
             ok = False
 
         status_code = 200 if ok else 503
-        return ORJSONResponse(
+        return JSONResponse(
             content={"status": "ready" if ok else "degraded", "checks": checks},
             status_code=status_code,
         )

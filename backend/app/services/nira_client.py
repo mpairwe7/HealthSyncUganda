@@ -10,10 +10,10 @@ Wider use cases (search, biometrics) are intentionally out of scope here.
 
 from __future__ import annotations
 
-import orjson
 from dataclasses import asdict, dataclass
 
 import httpx
+import orjson
 from fastapi import Depends
 
 from app.config import Settings, get_settings
@@ -59,7 +59,7 @@ class NiraClient:
             try:
                 redis = await get_redis()
                 await redis.set(cache_key, orjson.dumps(asdict(result)), ex=_CACHE_TTL)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("nira.cache_write_failed", error=str(exc))
         return result
 
@@ -67,7 +67,7 @@ class NiraClient:
         try:
             redis = await get_redis()
             raw = await redis.get(f"nira:nin:{nin}")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("nira.cache_unavailable", error=str(exc))
             return None
         if not raw:
@@ -95,7 +95,7 @@ class NiraClient:
     async def _verify_with_fallback(self, nin: str) -> NinVerification:
         try:
             return await self._verify_live(nin)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("nira.live_unavailable_using_cache", error=str(exc))
             cached = await self._cache_lookup(nin)
             if cached:

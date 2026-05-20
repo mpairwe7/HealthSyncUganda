@@ -34,9 +34,8 @@ async def staff_login(
     body: LoginRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> TokenResponse:
-    user = (
-        await db.scalars(select(User).where(User.username == body.identifier, User.active.is_(True)))
-    ).one_or_none()
+    stmt = select(User).where(User.username == body.identifier, User.active.is_(True))
+    user = (await db.scalars(stmt)).one_or_none()
 
     if user is None or not verify_password(body.password, user.password_hash):
         # Constant-message reply prevents user-enumeration via timing

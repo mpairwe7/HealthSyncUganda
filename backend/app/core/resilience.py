@@ -6,7 +6,7 @@ These are the load-bearing patterns for an interoperability gateway:
   filtering. Idempotent reads only by default.
 * **Circuit breaker**: half-open probing after a recovery interval. Failing
   upstream services trip the breaker; subsequent calls fail fast with
-  `UpstreamUnavailable` until the breaker resets.
+  `UpstreamUnavailableError` until the breaker resets.
 * **Bulkhead**: bounded concurrency per upstream so a slow dependency cannot
   exhaust the FastAPI worker.
 * **Fallback**: combine with `@resilient` to return a degraded-but-safe
@@ -24,7 +24,7 @@ import random
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any, ParamSpec, TypeVar
 
 from opentelemetry import trace
@@ -42,18 +42,18 @@ tracer = trace.get_tracer(__name__)
 # ── Exceptions ───────────────────────────────────────────────────────────────
 
 
-class UpstreamUnavailable(Exception):
+class UpstreamUnavailableError(Exception):
     """Raised when a circuit breaker is open or the upstream is unreachable."""
 
 
-class BulkheadFull(Exception):
+class BulkheadFullError(Exception):
     """Raised when the concurrency bulkhead has no slots free."""
 
 
 # ── Circuit breaker ──────────────────────────────────────────────────────────
 
 
-class BreakerState(str, Enum):
+class BreakerState(StrEnum):
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
@@ -106,7 +106,7 @@ class CircuitBreaker:
                     self._state = BreakerState.HALF_OPEN
                     logger.info("circuit.half_open", breaker=self.name)
                 else:
-                    raise UpstreamUnavailable(
+                    raise UpstreamUnavailableError(
                         f"Circuit breaker '{self.name}' is OPEN"
                     )
 
@@ -159,7 +159,7 @@ def retry(
     base_delay_ms: int | None = None,
     max_delay_ms: int = 5_000,
     retry_on: tuple[type[BaseException], ...] = (Exception,),
-    do_not_retry_on: tuple[type[BaseException], ...] = (UpstreamUnavailable,),
+    do_not_retry_on: tuple[type[BaseException], ...] = (UpstreamUnavailableError,),
 ) -> Callable[[Callable[P, Awaitable[T]]], Callable[P, Awaitable[T]]]:
     """Decorator: retry an awaitable with exponential backoff + full jitter.
 
@@ -211,11 +211,11 @@ class Bulkhead:
         self._sem = asyncio.Semaphore(max_concurrent)
         self._max = max_concurrent
 
-    async def __aenter__(self) -> "Bulkhead":
+    async def __aenter__(self) -> Bulkhead:
         if not self._sem.locked() or self._sem._value > 0:  # type: ignore[attr-defined]
             await self._sem.acquire()
             return self
-        raise BulkheadFull(f"Bulkhead '{self.name}' is full ({self._max})")
+        raise BulkheadFullError(f"Bulkhead '{self.name}' is full ({self._max})")
 
     async def __aexit__(self, *_: Any) -> None:
         self._sem.release()
@@ -233,7 +233,7 @@ def get_bulkhead(name: str, max_concurrent: int = 16) -> Bulkhead:
 # ── Combined `@resilient` decorator ──────────────────────────────────────────
 
 
-def resilient(
+def resilient[T](
     *,
     breaker: str,
     bulkhead_concurrency: int = 16,
@@ -262,7 +262,7 @@ def resilient(
                 try:
                     async with bh:
                         return await cb.call(retried, *args, **kwargs)
-                except (UpstreamUnavailable, BulkheadFull) as exc:
+                except (UpstreamUnavailableError, BulkheadFullError) as exc:
                     if fallback is None:
                         raise
                     logger.warning(

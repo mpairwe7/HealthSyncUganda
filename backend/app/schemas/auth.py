@@ -30,7 +30,7 @@ class CitizenLoginRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
-    token_type: Literal["bearer"] = "bearer"
+    token_type: Literal["bearer"] = "bearer"  # noqa: S105 — OAuth 2.0 token-type label
     expires_in: int
     role: Role
     subject: str

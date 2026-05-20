@@ -66,11 +66,29 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "S", "ASYNC", "RUF"]
-ignore = ["S101", "S104"]
+# S101 assert (we use it in tests); S104 0.0.0.0 (intentional in container).
+# B008 function-call in default — FastAPI Depends() is the idiomatic pattern.
+# S311 non-crypto random — we only use it for retry jitter, not security.
+ignore = ["S101", "S104", "B008", "S311"]
+
+[tool.ruff.lint.per-file-ignores]
+# FHIR R4 field names are mandated camelCase by HL7; the validator names must
+# match the wire format exactly.
+"app/fhir/*.py" = ["N815"]
+# Schemas declare FastAPI request/response models — Pydantic field alias names
+# must match the JSON-on-the-wire shape, so camelCase is intentional here too.
+"app/schemas/*.py" = ["N815"]
+# Tests legitimately use hardcoded demo passwords.
+"tests/*.py" = ["S105", "S106"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+    # FastAPI deprecation: ORJSONResponse class no longer needed once we
+    # rely on response_model/return-type. Tracked, not blocking.
+    "ignore::DeprecationWarning:fastapi.*",
+]
 
 [tool.mypy]
 python_version = "3.12"

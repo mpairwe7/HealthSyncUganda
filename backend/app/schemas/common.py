@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
-from typing import Annotated, Generic, TypeVar
+from typing import Annotated, TypeVar
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
@@ -45,7 +45,7 @@ NIN = Annotated[str, BeforeValidator(_validate_nin)]
 UgandaPhone = Annotated[str, BeforeValidator(_validate_ug_phone)]
 
 
-class Page(BaseModel, Generic[T]):
+class Page[T](BaseModel):
     """Cursor-friendly paginated response. Total is *approximate* on hot tables."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -89,11 +89,11 @@ class CodeSystems:
 
 __all__ = [
     "NIN",
-    "UgandaPhone",
-    "Page",
+    "CodeSystems",
     "ErrorDetail",
     "ErrorResponse",
-    "CodeSystems",
-    "utcnow",
+    "Page",
+    "UgandaPhone",
     "date",
+    "utcnow",
 ]

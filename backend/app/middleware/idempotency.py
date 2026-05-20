@@ -43,7 +43,7 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         try:
             redis = await get_redis()
             cached = await redis.get(cache_key)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("idempotency.cache_unavailable", error=str(exc))
             return await call_next(request)
 
@@ -77,7 +77,7 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                     ),
                     ex=TTL_SECONDS,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("idempotency.cache_write_failed", error=str(exc))
             return Response(
                 content=body,

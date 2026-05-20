@@ -7,7 +7,7 @@ import pytest
 from app.core.resilience import (
     BreakerState,
     CircuitBreaker,
-    UpstreamUnavailable,
+    UpstreamUnavailableError,
     retry,
 )
 
@@ -24,7 +24,7 @@ async def test_breaker_opens_after_threshold():
             await cb.call(boom)
     assert cb.state == BreakerState.OPEN
 
-    with pytest.raises(UpstreamUnavailable):
+    with pytest.raises(UpstreamUnavailableError):
         await cb.call(boom)
 
     await asyncio.sleep(0.06)

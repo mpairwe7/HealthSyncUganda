@@ -49,7 +49,13 @@ class ObservationResource(FhirModel):
     resourceType: Literal["Observation"] = "Observation"
     id: str | None = None
     status: Literal[
-        "registered", "preliminary", "final", "amended", "corrected", "cancelled", "entered-in-error"
+        "registered",
+        "preliminary",
+        "final",
+        "amended",
+        "corrected",
+        "cancelled",
+        "entered-in-error",
     ] = "final"
     category: list[CodeableConcept] = Field(default_factory=list)
     code: CodeableConcept

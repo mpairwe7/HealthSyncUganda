@@ -148,14 +148,14 @@ async def dispense(
         )
 
     if remaining_to_take > 0:
-        raise InsufficientStock(
+        raise InsufficientStockError(
             f"Not enough stock at facility: requested {quantity}, "
             f"short by {remaining_to_take}."
         )
     return events
 
 
-class InsufficientStock(Exception):
+class InsufficientStockError(Exception):
     """Raised when a dispense or transfer cannot be satisfied."""
 
 

@@ -30,7 +30,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             current = await redis.incr(bucket)
             if current == 1:
                 await redis.expire(bucket, WINDOW_SECONDS)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("ratelimit.disabled", error=str(exc))
             return await call_next(request)
 

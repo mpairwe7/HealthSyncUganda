@@ -25,7 +25,7 @@ from app.schemas.supply import (
     SupplyItemOut,
 )
 from app.services.supply_ledger import (
-    InsufficientStock,
+    InsufficientStockError,
     append_event,
     receive_stock,
 )
@@ -82,7 +82,8 @@ async def create_item(
     db: Annotated[AsyncSession, Depends(get_db)],
     _: Annotated[Principal, Depends(require_role("ministry_admin"))],
 ) -> SupplyItemOut:
-    existing = (await db.scalars(select(SupplyItem).where(SupplyItem.code == body.code))).one_or_none()
+    stmt = select(SupplyItem).where(SupplyItem.code == body.code)
+    existing = (await db.scalars(stmt)).one_or_none()
     if existing:
         raise HTTPException(status.HTTP_409_CONFLICT, "Item code already registered")
     it = SupplyItem(**body.model_dump())
@@ -346,7 +347,7 @@ async def dispense_endpoint(
             actor_id=principal.subject,
             encounter_id=encounter_id,
         )
-    except InsufficientStock as exc:
+    except InsufficientStockError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 
     return {"dispensed_quantity": quantity, "events_recorded": len(events)}

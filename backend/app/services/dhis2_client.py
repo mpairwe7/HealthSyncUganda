@@ -7,10 +7,10 @@ we accumulate events in Redis and replay them when service returns.
 
 from __future__ import annotations
 
-import orjson
 from dataclasses import asdict, dataclass
 
 import httpx
+import orjson
 from fastapi import Depends
 
 from app.config import Settings, get_settings
@@ -45,7 +45,7 @@ class Dhis2Client:
     async def post_tallies(self, values: list[DataValue]) -> dict[str, int]:
         try:
             return await self._post_live(values)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("dhis2.unavailable_queued", error=str(exc), pending=len(values))
             await self._queue(values)
             return {"queued": len(values), "delivered": 0}
@@ -75,7 +75,7 @@ class Dhis2Client:
             try:
                 await self._post_live([value])
                 delivered += 1
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("dhis2.replay_failed", error=str(exc))
                 await redis.lpush("dhis2:pending", raw)  # put back
                 break

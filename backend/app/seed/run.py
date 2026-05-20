@@ -160,7 +160,7 @@ async def _seed_encounters(
     facilities = list(facility_ids.values())
     now = datetime.now(UTC)
     diagnosis_pool = ["B54", "A09.9", "J06.9", "E11.9", "O09.5"]  # ICD-10
-    for nin, pid in patient_ids.items():
+    for _nin, pid in patient_ids.items():
         for _ in range(rnd.randint(1, 3)):
             started = now - timedelta(days=rnd.randint(1, 60), hours=rnd.randint(0, 23))
             enc = Encounter(

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
 
-def setup_telemetry(app: "FastAPI") -> None:
+def setup_telemetry(app: FastAPI) -> None:
     """Initialise OTel tracing + instrument FastAPI/SQLAlchemy/Redis/HTTPX."""
     settings = get_settings()
     if not settings.otel_exporter_otlp_endpoint:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import ClassVar
 from uuid import UUID, uuid4
 
 from sqlalchemy import DateTime, MetaData, String
@@ -38,7 +39,10 @@ def _utcnow() -> datetime:
 
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=naming_convention)
-    type_annotation_map = {dict: JSONBOrJSON, list: JSONBOrJSON}
+    type_annotation_map: ClassVar[dict[type, JSONBOrJSON]] = {
+        dict: JSONBOrJSON,
+        list: JSONBOrJSON,
+    }
 
 
 class TimestampMixin:

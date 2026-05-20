@@ -7,10 +7,10 @@ Redis is down, results are computed fresh.
 
 from __future__ import annotations
 
-import orjson
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
+import orjson
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -37,13 +37,13 @@ async def _cached(key: str, build):
         raw = await redis.get(key)
         if raw:
             return orjson.loads(raw)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("analytics.cache_unavailable", error=str(exc))
         return await build()
     fresh = await build()
     try:
         await redis.set(key, orjson.dumps(fresh), ex=_CACHE_TTL)  # type: ignore[possibly-undefined]
-    except Exception:  # noqa: BLE001, S110
+    except Exception:  # noqa: S110
         pass
     return fresh
 

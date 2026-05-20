@@ -1,0 +1,79 @@
+# Continuous dependency management for HealthSync Uganda.
+#
+# Vulnerability triage SLA (see docs/SECURITY.md):
+#   - acknowledge:  48 h
+#   - critical fix: 30 d
+#   - high fix:     90 d
+#   - medium/low:   180 d
+#
+# Patched findings ship in the next merge to main; accepted findings are
+# logged in docs/SECURITY.md §"Known advisories and waivers".
+
+version: 2
+updates:
+  # Python (backend)
+  - package-ecosystem: "uv"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Africa/Kampala"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "backend"
+    commit-message:
+      prefix: "chore(deps,backend)"
+    groups:
+      patch-and-minor:
+        update-types: ["patch", "minor"]
+
+  # JavaScript / TypeScript (frontend)
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Africa/Kampala"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "frontend"
+    commit-message:
+      prefix: "chore(deps,frontend)"
+    groups:
+      patch-and-minor:
+        update-types: ["patch", "minor"]
+      types:
+        patterns:
+          - "@types/*"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "chore(deps,ci)"
+
+  # Docker base images
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "docker"

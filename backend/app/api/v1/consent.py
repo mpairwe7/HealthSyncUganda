@@ -77,11 +77,12 @@ async def list_for_patient(
         if not patient or patient.nin != principal.subject:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your record")
 
-    rows = (
-        await db.scalars(
-            select(Consent).where(Consent.patient_id == patient_id).order_by(Consent.granted_at.desc())
-        )
-    ).all()
+    stmt = (
+        select(Consent)
+        .where(Consent.patient_id == patient_id)
+        .order_by(Consent.granted_at.desc())
+    )
+    rows = (await db.scalars(stmt)).all()
     return [_to_out(c) for c in rows]
 
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
@@ -21,7 +20,6 @@ def anyio_backend():
 
 @pytest.fixture()
 async def db_session() -> AsyncIterator[AsyncSession]:
-    settings = get_settings()
     # Reload settings to a sqlite memory DB so tests are isolated
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
     async with engine.begin() as conn:
