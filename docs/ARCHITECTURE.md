@@ -152,3 +152,55 @@ The architecture deliberately matches the constraints of being *adopted* by the 
 - **Open formats.** Backups are Postgres `pg_dump` + Redis RDB. Migration to a different vendor is `pg_restore`, not a rewrite.
 - **Operator-friendly.** Health probes, structured logs, OpenAPI, OTel — standard tooling a NITA-U engineer already knows.
 - **No proprietary glue.** Every connector is HTTP + JSON over FHIR, easy to extend.
+
+## 12. Forward-looking architecture (2026+)
+
+The architecture is **not** designed to chase trends, but the platform is engineered so that the following 2026-era concerns can be adopted without rewrite. Each line carries a stable identifier (`FA-NN`) and a target window aligned with [THREAT_MODEL.md §7 Roadmap Closure Plan](./THREAT_MODEL.md#7-roadmap-closure-plan).
+
+### Zero-trust architecture
+
+The detailed posture and roadmap live in [SECURITY.md §"Zero-trust elements"](./SECURITY.md#zero-trust-elements). Architecturally relevant items:
+
+| ID    | Item                                                                                                                              | Target          |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| FA-01 | Per-request JWT verification (already implemented) — no session-cookie trust path                                                 | Implemented     |
+| FA-02 | Production IdP (Keycloak / Authentik / NIRA OIDC) issuing RS256 tokens; JWKS rotation                                              | Pre-national    |
+| FA-03 | Service mesh (Istio or Linkerd) for in-cluster mTLS and NetworkPolicy enforcement                                                  | Pre-national    |
+| FA-04 | Device attestation (FIDO L3 / WebAuthn) for the worker fleet                                                                       | Pre-national    |
+| FA-05 | Continuous behavioural validation via OpenTelemetry — already exposes the signals that AL-12 … AL-14 in [OBSERVABILITY.md](./OBSERVABILITY.md) consume | Implemented     |
+
+The pilot ships with FA-01 and FA-05 implemented; FA-02 → FA-04 are scheduled per the closure plan.
+
+### Differential privacy for analytics
+
+`/api/v1/analytics/*` returns aggregates only (DPPA s.31; [COMPLIANCE.md](./COMPLIANCE.md)). Aggregate output below a k-anonymity threshold can still leak when an attacker correlates multiple queries over time. The path forward:
+
+| ID    | Item                                                                                                                                                                                                       | Target          |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| FA-06 | **k-anonymity guard** on every analytics response: when a cell's underlying cohort is smaller than *k* (default *k* = 20), the cell returns `null` with a `"suppressed_for_privacy": true` flag.            | Pre-pilot       |
+| FA-07 | **Laplace-noise injection** on integer counts and rate denominators for cells above *k* but below a second threshold (`k_noise = 100`). Magnitude calibrated to (ε, δ)-DP with ε ≤ 1 over a 24 h budget.    | During pilot    |
+| FA-08 | **Per-actor query budget** — cumulative ε is tracked per `actor_id` per day; exceeding the budget downgrades responses to k-only suppression.                                                              | Pre-national    |
+| FA-09 | **DP audit trail** — every DP-modified response carries a structured note in the audit log so reviewers can distinguish noise from data.                                                                    | Pre-national    |
+
+This places HealthSync ahead of the typical 2026 East African digital-health baseline (which is usually plain k-anonymity at best).
+
+### AI governance readiness
+
+The platform does **not** train AI models on patient data in the pilot. The architecture nonetheless prepares for the inevitable: clinical decision-support, predictive stock-out alerts, NLP on clinical notes, image classification for AMR surveillance.
+
+| ID    | Principle                                                                                                                                                              | Target / status                                                                                                                  |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| FA-10 | **No model trained on identifiable data without explicit consent** (DPPA s.22). Training pipelines must consume the differential-privacy-protected analytics surface.    | Policy from day one; enforced at the data-access layer.                                                                          |
+| FA-11 | **Model cards** for every deployed model — input schema, training data provenance, fairness evaluation across districts and gender, intended use, known failure modes. | Required at first model deployment (currently none). Card template in `docs/models/_template.md` to be added when first needed. |
+| FA-12 | **Human-in-the-loop on clinical decisions.** AI outputs are advisory only; the clinician records the final decision in the encounter.                                  | Architecturally enforced via the existing `Encounter.diagnosis_codes` write path (clinician-authored only).                       |
+| FA-13 | **Inference logging** — every AI-driven recommendation surfaced to a user produces an `audit_log` row with `action="ai-inference"` so the recommendation chain is auditable. | When first AI feature ships.                                                                                                     |
+| FA-14 | **Africa CDC AI governance alignment** — track and implement Africa CDC AI-in-health framework recommendations as they ratify.                                          | Continuous.                                                                                                                       |
+
+The principles are derived from the WHO *Ethics & Governance of AI for Health* guidance (2021, updated 2024) and the emerging Africa CDC Digital Transformation Strategy AI principles. They are *policy* commitments; the *technical* primitives (audit log, structured analytics, model-card template) are either implemented or scaffolded.
+
+### Cross-references
+
+- [SECURITY.md §"Zero-trust elements"](./SECURITY.md#zero-trust-elements) — operational counterpart of FA-01 … FA-05.
+- [THREAT_MODEL.md §7 Roadmap Closure Plan](./THREAT_MODEL.md#7-roadmap-closure-plan) — the RR closures that the zero-trust roadmap rests on.
+- [INTEROPERABILITY.md §"Forward-looking trends (2026+)"](./INTEROPERABILITY.md#forward-looking-trends-2026) — FHIR R5, IHE, Africa CDC.
+- [COMPLIANCE.md](./COMPLIANCE.md) — DPPA controls already in place that FA-06 … FA-09 strengthen.

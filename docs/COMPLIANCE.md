@@ -21,7 +21,7 @@ This document maps every relevant section of Uganda's *Data Protection and Priva
 | s.14 | Accountability | Every access logged with actor + purpose + consent_id | `app/core/audit.py:record_access` |
 | s.17 | Security measures | Defense-in-depth: TLS, HSTS, rate-limit, RBAC, audit, idempotency, circuit-breakers | `docs/SECURITY.md` |
 | s.18 | Retention | Documented + technical (cache TTLs + lifecycle policies on Postgres / Redis) | `docs/DPIA.md §9` |
-| s.19 | Notification of breach | Breach playbook + 72-hour PDPO notification SLA | `docs/INCIDENT_RESPONSE.md` (operational, post-pilot) |
+| s.19 | Notification of breach | Breach playbook + 72-hour PDPO notification SLA | [`docs/INCIDENT_RESPONSE.md`](./INCIDENT_RESPONSE.md) — IR-30 notification template, IR-20…IR-25 incident classes |
 | s.20 | Data Protection Officer (DPO) | MoH-appointed DPO; contact details published in citizen portal | Operational |
 | s.21 | Sub-processor management | NITA-U + NIRA only by default; cross-border requires PDPO adequacy | `docs/DPIA.md §6, §8` |
 | s.22 | Consent | Explicit, granular, revocable; child-guardian flagged | `app/db/models/consent.py` |
@@ -63,7 +63,7 @@ This document maps every relevant section of Uganda's *Data Protection and Priva
 | TLS 1.2+ | Enforced at edge |
 | Centralised logging (NITA-U SIEM compatible) | JSON-structured logs ship to any SIEM (Loki, Splunk, Elastic, Wazuh) |
 | Vulnerability management | `bandit` (Python), `bun audit` (JS) wired into `make lint`; quarterly external scan planned |
-| Incident reporting (CERT-UG) | 24-hour playbook in `docs/INCIDENT_RESPONSE.md` (post-pilot) |
+| Incident reporting (CERT-UG) | 24-hour notification path in [`docs/INCIDENT_RESPONSE.md`](./INCIDENT_RESPONSE.md) §6 communication tree |
 
 ## E. Independent verifications scheduled before pilot
 

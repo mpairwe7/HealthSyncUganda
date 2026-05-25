@@ -41,3 +41,15 @@ tsconfig.tsbuildinfo
 *.log
 *.pid
 .cache/
+
+# Local tooling
+.claude/settings.local.json
+.claude/plans/
+
+# Submission packet — kept out of git per project policy
+submission/
+
+# Generated QA / evidence artefacts (kept locally, committed only when sanitised)
+loadtest-results/
+lighthouse-results/
+axe-results/
