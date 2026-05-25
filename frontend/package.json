@@ -8,7 +8,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "e2e": "playwright test",
+    "e2e:staging": "playwright test --config=e2e/playwright.config.staging.ts",
+    "e2e:install": "playwright install --with-deps chromium"
   },
   "overrides": {
     "postcss": "^8.5.10"
@@ -42,7 +45,8 @@
     "postcss": "^8.5.0",
     "autoprefixer": "^10.4.20",
     "eslint": "^9.17.0",
-    "eslint-config-next": "^16.2.6"
+    "eslint-config-next": "^16.2.6",
+    "@playwright/test": "^1.49.0"
   },
   "engines": {
     "bun": ">=1.1.0"

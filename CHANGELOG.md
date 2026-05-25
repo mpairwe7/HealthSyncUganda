@@ -28,6 +28,16 @@ This file is the canonical, audit-facing history of user-visible changes. It is 
 - Frontend: <https://healthsync-frontend-staging-b73f2f98.renu-01.cranecloud.io> — HTTP 200 with full security headers (`x-content-type-options`, `referrer-policy`, `permissions-policy`).
 - All 4 Crane Cloud apps in project `healthsync-uganda-staging` (`572536c1-eee6-47a7-bff5-78e8bcc0d415`, RENU cluster) running.
 
+### Added (P6 — Playwright E2E smoke tests against live staging)
+- `frontend/e2e/playwright.config.staging.ts` — targets the deployed Crane Cloud URLs (`FE_URL`, `BE_URL` overrideable via env); single-worker (don't swamp single-replica staging); HTML reporter; trace + screenshot on failure. Workarounds for container/CI shells: `chromiumSandbox: false`, `--no-sandbox`, `--disable-dev-shm-usage`, `TMPDIR` redirected to local fs (default `/tmp` is on NFS where Chromium's `SingletonLock` fails with EOPNOTSUPP).
+- `frontend/e2e/staging-smoke.spec.ts` — **19 tests covering** five describe blocks: landing + navigation (5 routes), PWA + security posture (3 — sw, manifest, headers), backend documented endpoints (5 — healthz, readyz, fhir/metadata, openapi.json, /docs), backend auth & access control (5 — 401/422/403 defenses), frontend↔backend integration (1 — no 5xx during login flow).
+- `frontend/package.json` — adds `@playwright/test ^1.49.0` dev dep + three npm scripts (`e2e`, `e2e:staging`, `e2e:install`).
+- `.gitignore` — adds `e2e-results/`, `**/test-results/`, `**/playwright-report/`.
+
+**Last run:** 19/19 passed in 49.1 s against `https://healthsync-backend-staging-9b4ecff1.renu-01.cranecloud.io` + `https://healthsync-frontend-staging-b73f2f98.renu-01.cranecloud.io`.
+
+**Wait-strategy note:** the frontend's TanStack Query + service-worker fetches keep the network perpetually busy, so `networkidle` never settles. Tests use `waitUntil: "domcontentloaded"` for navigation + an explicit `waitForTimeout(3000)` where bootstrap fetches matter — documented at the top of the spec file.
+
 ### Added (P5 — Submission packet rendered)
 - `submission/HealthSync-Uganda-System-Description.pdf` — **4 pages A4, 41 KB**, rendered via `weasyprint` + Python `markdown` (no LaTeX needed). Recipe documented in `submission/README.md §3`.
 - `submission/HealthSync-Uganda-System-Description.html` — HTML companion (~17 KB).
