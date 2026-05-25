@@ -15,6 +15,10 @@ This file is the canonical, audit-facing history of user-visible changes. It is 
 
 ## [Unreleased]
 
+### Known follow-ups (pre-pilot)
+
+- **Wire up Alembic migrations.** `alembic>=1.13.0` is in `backend/pyproject.toml` and `uv.lock` but `alembic.ini` / `env.py` / migration revisions do not exist yet. Until then the backend uses `Base.metadata.create_all` on startup (`auto_create_schema=true` in `Settings`) — idempotent for adding new tables but does not handle ALTERs. This is acceptable for the pilot's initial fresh-DB deploy but must be replaced with real migrations before production schema evolution.
+
 ### Added (CI/CD)
 - `.github/workflows/build-push.yml` — multi-image GHCR build & push on `main` / `v*` tag / `workflow_dispatch`, with auto-dispatch to staging (on `main`) and pilot (on `v*`).
 - `.github/workflows/deploy-cranecloud.yml` — operator-led Crane Cloud rollout via the `cranecloud` CLI; keyring disabled with `PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring`; environment-scoped secrets; loud fallback to `make update-*` when the CLI cannot authenticate.

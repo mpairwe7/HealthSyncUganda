@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     database_pool_size: int = 10
     database_max_overflow: int = 20
 
+    # Stop-gap until proper Alembic migrations are wired up. When true, the
+    # backend's lifespan hook runs `Base.metadata.create_all` on startup —
+    # idempotent (only creates missing tables; never ALTERs existing ones).
+    # This unblocks first-deploy on Crane Cloud where there is no separate
+    # migration step. Set to false once Alembic is configured and migrations
+    # are applied via `uv run alembic upgrade head`. Tracked as a pre-pilot
+    # follow-up; see CHANGELOG.md "Known follow-ups".
+    auto_create_schema: bool = True
+
     # ── Redis ────────────────────────────────────────────────────────────
     redis_url: str = "redis://localhost:6379/0"
 

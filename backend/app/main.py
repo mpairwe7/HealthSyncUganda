@@ -35,11 +35,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.log_level, json_output=settings.is_production)
     logger.info("startup", env=settings.app_env, version="0.1.0")
 
-    # Dev convenience: auto-create schema if migrations haven't been run.
-    if settings.app_env in {"development", "test"}:
+    # Auto-create schema on startup if Alembic migrations are not (yet) wired up.
+    # `Base.metadata.create_all` is idempotent — it only creates tables that
+    # don't already exist; it never ALTERs existing tables. Safe to run on
+    # every startup; necessary for first-deploy on a fresh Postgres.
+    # Toggle via `AUTO_CREATE_SCHEMA=false` once Alembic is configured and
+    # migrations are applied out-of-band. See app/config.py for context.
+    if settings.auto_create_schema:
         engine = get_engine()
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        logger.info("schema.create_all_complete", env=settings.app_env)
 
     # Warm Redis. Service boots even if Redis is down (middlewares degrade
     # open), but several features lose fidelity — log loudly so the

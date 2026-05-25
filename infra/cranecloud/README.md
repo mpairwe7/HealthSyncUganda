@@ -147,14 +147,19 @@ BACKEND_APP_ID=<uuid-from-cli>
 FRONTEND_APP_ID=<uuid-from-cli>
 ```
 
-After `deploy-postgres` completes, run the Alembic migrations against the new database **before** `deploy-backend` reads/writes:
+### Schema bootstrap
+
+The backend auto-creates its schema on first startup via `Base.metadata.create_all` in the FastAPI lifespan hook, gated on the `AUTO_CREATE_SCHEMA` env var (default `true`). This means: as long as `AUTO_CREATE_SCHEMA=true` is set (or left at default), `deploy-backend` itself bootstraps the schema against the freshly-deployed Postgres app — no separate migration step.
+
+**Stop-gap notice.** `create_all` is idempotent for adding new tables but does **not** apply ALTERs or destructive changes — it cannot evolve a live schema. Before production go-live with real PHI, the project commits to wiring up proper Alembic migrations (declared in `pyproject.toml`, not yet configured). At that point set `AUTO_CREATE_SCHEMA=false` and the deploy flow becomes:
 
 ```bash
-# from the repo root, with DATABASE_URL pointing at the new Postgres app
-cd backend && uv run alembic upgrade head
+make -C infra/cranecloud deploy-postgres ENV=<env>
+cd backend && uv run alembic upgrade head     # against the Crane Cloud Postgres
+make -C infra/cranecloud deploy-backend ENV=<env>
 ```
 
-(Alternatively the backend can run migrations on startup — that's a future enhancement; today migrations are operator-initiated.)
+Tracked as a pre-pilot follow-up; see `CHANGELOG.md` "Known follow-ups".
 
 These IDs are what `make update-*` targets later — without them, you'd accidentally create duplicate apps.
 
