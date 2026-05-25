@@ -15,8 +15,29 @@ This file is the canonical, audit-facing history of user-visible changes. It is 
 
 ## [Unreleased]
 
+### Added (P1 — Full CI/CD pipeline for Crane Cloud + Docker Hub)
+- `.github/workflows/deploy-cranecloud.yml` overhauled: switched keyring backend from `null` to `keyrings.alt.file.PlaintextKeyring`; dropped `docker.io/` prefix on image refs; added pre-update capture of current image (for rollback); post-update health-check polling (6-min budget); **automatic rollback to previous image** if health check fails; smoke-test of `/fhir/metadata` + `/openapi.json` + `/api/v1/patients` 401 expectation; structured run-summary with live URLs + clickable probe links; PR comment with deployed URL when triggered with `pr_number`.
+- `.github/workflows/deploy-databases.yml` (new): one-shot `workflow_dispatch` flow for Postgres + Redis (separate from rolling backend/frontend); five actions (`create-postgres`, `create-redis`, `create-both`, `update-postgres-image`, `update-redis-image`); surfaces ready-to-paste `gh secret set` commands in the run summary.
+- `.github/workflows/release.yml` (new): on `v*` tag push, extracts the matching `CHANGELOG.md` section, lists the three Docker Hub image tags, marks pre-release for `v*-*` semver tags, creates the GitHub Release.
+
 ### Changed (CI/CD)
 - `build-push.yml` and `deploy-cranecloud.yml` now use **Docker Hub** (`docker.io/mpairwe7/...`) instead of GHCR. Crane Cloud's RENU and AHUMAIN ML clusters cannot pull from `ghcr.io` (confirmed 2026-05-26 via control-deploy); Docker Hub pulls work cleanly. Requires repo variable `DOCKERHUB_USER` + repo secret `DOCKERHUB_TOKEN`.
+
+### Live (staging) — verified 2026-05-26
+- Backend: <https://healthsync-backend-staging-9b4ecff1.renu-01.cranecloud.io> — `/healthz` 200, `/readyz` `{status:"ready", database:"ok", redis:"ok"}`, `/fhir/metadata` returns FHIR R4 CapabilityStatement, `/openapi.json` lists 24 endpoints.
+- Frontend: <https://healthsync-frontend-staging-b73f2f98.renu-01.cranecloud.io> — HTTP 200 with full security headers (`x-content-type-options`, `referrer-policy`, `permissions-policy`).
+- All 4 Crane Cloud apps in project `healthsync-uganda-staging` (`572536c1-eee6-47a7-bff5-78e8bcc0d415`, RENU cluster) running.
+
+### Added (P5 — Submission packet rendered)
+- `submission/HealthSync-Uganda-System-Description.pdf` — **4 pages A4, 41 KB**, rendered via `weasyprint` + Python `markdown` (no LaTeX needed). Recipe documented in `submission/README.md §3`.
+- `submission/HealthSync-Uganda-System-Description.html` — HTML companion (~17 KB).
+- `submission/figures/01-c4-context.png` … `04-security-boundaries.png` — **4 PNG diagrams** (60–130 KB each) rendered via `mmdc` with a no-sandbox Puppeteer config (required in container/CI shells).
+- `submission/diagrams/01-c4-context.mmd` — patched: edge labels with `/` and `+` (which trip Mermaid 11.x's lexer in `-.label.->` syntax) are now quoted as `-. "label" .->`.
+- `submission/README.md` — updated build recipe (weasyprint path replaces the previous pandoc+xelatex recipe; matches what was actually used to render); pre-submission checklist now reflects actual state (PDF 4 pages, 4/6 figures done, 2 UI screenshots still pending).
+- All `submission/*` artefacts remain **gitignored** per project policy — exist only on the operator's local machine.
+
+### Added (P4 — Crane Cloud operational quirks documented)
+- `infra/cranecloud/README.md §10A` — captures every platform behaviour discovered during the live staging deploy: no `docker.io/` prefix on image URLs; containers must listen on port 3000 internally (cranecloud's ingress always proxies to :3000); `apps update -e` silently doesn't update env vars (delete + redeploy required); CLI positional-vs-flag quirks; keyring backend required for non-tty CI (`keyrings.alt.file.PlaintextKeyring`); TCP-service status flapping; URL-hex changes on every recreate; only RENU and AHUMAIN ML clusters available (makerere-1 disabled); no documented persistent volumes; `cranecloud apps info` exposes env values in plaintext.
 
 ### Added (P3 — Alembic migrations wired up)
 - `backend/alembic.ini` + `backend/alembic/env.py` configured to read `DATABASE_URL` from the app's `Settings`, import `Base.metadata` + all 11 ORM models, and translate `asyncpg`/`aiosqlite` URLs to their sync equivalents (`psycopg`/`sqlite`) for Alembic's sync context.
