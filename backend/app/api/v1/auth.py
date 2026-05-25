@@ -111,7 +111,9 @@ async def seed_admin(db: Annotated[AsyncSession, Depends(get_db)]) -> dict[str, 
 
 
 @router.post("/seed-demo", include_in_schema=False)
-async def seed_demo() -> dict[str, str | int]:
+async def seed_demo(
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, str | int]:
     """Demo helper — runs the FULL seed (facilities, users, supply items,
     patients, encounters, consents) into the configured database.
 
@@ -122,12 +124,10 @@ async def seed_demo() -> dict[str, str | int]:
     Postgres app (which the platform creates empty + no documented
     persistent volumes — see infra/cranecloud/README.md §0.1).
 
-    Counts are returned for downstream verification.
+    Returns counts of facilities/users/patients post-seed for downstream
+    verification.
     """
     from app.config import get_settings
-    from app.db.session import dispose_engine, get_session_factory
-    from app.db.models.facility import Facility
-    from app.db.models.patient import Patient
 
     settings = get_settings()
     if settings.is_production:
@@ -136,22 +136,59 @@ async def seed_demo() -> dict[str, str | int]:
             "seed-demo disabled in APP_ENV=production",
         )
 
-    # Import lazily so the seed module isn't loaded on every request — only
-    # when this endpoint is hit.
-    from app.seed.run import main as run_seed
+    # Lazy import — seed module loads ~10 KB of demo data; skip if endpoint
+    # isn't called.
+    from app.db.models.facility import Facility
+    from app.db.models.patient import Patient
+    from app.seed import run as seed_run
 
     logger.info("auth.seed_demo.start", env=settings.app_env)
-    await run_seed()
-    # run_seed disposes the engine; reopen and count what landed
-    factory = get_session_factory()
-    async with factory() as s:
-        facilities = (await s.scalars(select(Facility))).all()
-        users = (await s.scalars(select(User))).all()
-        patients = (await s.scalars(select(Patient))).all()
+
+    try:
+        # Use the request's session (get_db already commits on success,
+        # rollbacks on exception). Run each seed step in sequence; they
+        # all upsert idempotently.
+        facility_ids = await seed_run._seed_facilities(db)
+        await seed_run._seed_users(db, facility_ids)
+        items = await seed_run._seed_supply_items(db)
+        patients = await seed_run._seed_patients(db)
+        admin = (
+            await db.scalars(select(User).where(User.username == "admin"))
+        ).one_or_none()
+        if admin is None:
+            # Fall back: create admin first (mirrors seed-admin), then re-fetch
+            db.add(
+                User(
+                    username="admin",
+                    full_name="Demo Administrator",
+                    role="ministry_admin",
+                    password_hash=hash_password("admin1234"),
+                )
+            )
+            await db.flush()
+            admin = (
+                await db.scalars(select(User).where(User.username == "admin"))
+            ).one()
+        await seed_run._seed_stock(db, facility_ids, items, admin.id)
+        await seed_run._seed_encounters(db, patients, facility_ids)
+        await seed_run._seed_consents(db, patients, admin.id)
+        await db.flush()
+    except Exception as exc:
+        logger.exception("auth.seed_demo.failed", error=str(exc))
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"seed failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    # Count what landed (within the same session, before commit)
+    n_facilities = len((await db.scalars(select(Facility))).all())
+    n_users = len((await db.scalars(select(User))).all())
+    n_patients = len((await db.scalars(select(Patient))).all())
+
     counts = {
-        "facilities": len(facilities),
-        "users":      len(users),
-        "patients":   len(patients),
+        "facilities": n_facilities,
+        "users":      n_users,
+        "patients":   n_patients,
     }
     logger.info("auth.seed_demo.done", **counts)
     return {"seeded": "demo", **counts}
