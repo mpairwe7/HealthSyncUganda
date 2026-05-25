@@ -55,6 +55,10 @@ dev = [
     "ruff>=0.7.0",
     "mypy>=1.13.0",
     "freezegun>=1.5.0",
+    # Sync Postgres driver — required by Alembic when running migrations
+    # against a Postgres database (Alembic itself is sync-only; asyncpg
+    # is async-only). Only needed at migration time, not at app runtime.
+    "psycopg[binary]>=3.2.0",
 ]
 
 [tool.uv]

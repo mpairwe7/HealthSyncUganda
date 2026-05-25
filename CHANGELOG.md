@@ -18,9 +18,13 @@ This file is the canonical, audit-facing history of user-visible changes. It is 
 ### Changed (CI/CD)
 - `build-push.yml` and `deploy-cranecloud.yml` now use **Docker Hub** (`docker.io/mpairwe7/...`) instead of GHCR. Crane Cloud's RENU and AHUMAIN ML clusters cannot pull from `ghcr.io` (confirmed 2026-05-26 via control-deploy); Docker Hub pulls work cleanly. Requires repo variable `DOCKERHUB_USER` + repo secret `DOCKERHUB_TOKEN`.
 
-### Known follow-ups (pre-pilot)
+### Added (P3 — Alembic migrations wired up)
+- `backend/alembic.ini` + `backend/alembic/env.py` configured to read `DATABASE_URL` from the app's `Settings`, import `Base.metadata` + all 11 ORM models, and translate `asyncpg`/`aiosqlite` URLs to their sync equivalents (`psycopg`/`sqlite`) for Alembic's sync context.
+- `backend/alembic/versions/498638f987ec_initial_schema_*.py` — initial migration auto-generated from `Base.metadata`; creates all 11 tables + indexes + GIN trigram index (on Postgres) and matches what `create_all` produces. Verified end-to-end against a fresh SQLite database.
+- `backend/pyproject.toml` — added `psycopg[binary]>=3.2.0` to the `dev` dependency group (Alembic needs sync drivers).
+- Backend's `auto_create_schema` setting remains the **default-on** behaviour for ephemeral envs. Production deployments where Alembic is run out-of-band should set `AUTO_CREATE_SCHEMA=false` and run `cd backend && uv run alembic upgrade head` as a pre-deploy step.
 
-- **Wire up Alembic migrations.** `alembic>=1.13.0` is in `backend/pyproject.toml` and `uv.lock` but `alembic.ini` / `env.py` / migration revisions do not exist yet. Until then the backend uses `Base.metadata.create_all` on startup (`auto_create_schema=true` in `Settings`) — idempotent for adding new tables but does not handle ALTERs. This is acceptable for the pilot's initial fresh-DB deploy but must be replaced with real migrations before production schema evolution.
+### Known follow-ups (pre-pilot)
 
 ### Added (CI/CD)
 - `.github/workflows/build-push.yml` — multi-image GHCR build & push on `main` / `v*` tag / `workflow_dispatch`, with auto-dispatch to staging (on `main`) and pilot (on `v*`).
