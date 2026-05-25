@@ -53,3 +53,7 @@ submission/
 loadtest-results/
 lighthouse-results/
 axe-results/
+
+# Crane Cloud per-environment values (templates *.env.example ARE committed)
+/infra/cranecloud/environments/*.env
+!/infra/cranecloud/environments/*.env.example

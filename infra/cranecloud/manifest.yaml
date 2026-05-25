@@ -1,0 +1,105 @@
+# Crane Cloud deployment manifest — HealthSync Uganda
+#
+# This file is the source of truth for *what* gets deployed to Crane Cloud.
+# It contains:
+#   - App identification (name, image, port, replicas)
+#   - The NAMES of environment variables the app expects.
+#
+# It does NOT contain secret values. Secrets are resolved at deploy time from
+# the shell environment (loaded from `environments/<env>.env`, gitignored).
+#
+# The `cranecloud` CLI does not consume this YAML directly. The Makefile
+# (`infra/cranecloud/Makefile`) reads the structure of this file mentally
+# (image, port, env names) and passes the values via `cranecloud apps deploy`
+# flags. Keep the two in sync when you change either.
+#
+# Last reviewed: 2026-05-25.
+
+project:
+  name: healthsync-uganda
+  # The Crane Cloud project_id (UUID) is fetched once with
+  # `cranecloud projects list` and stored in environments/<env>.env as
+  # CRANECLOUD_PROJECT_ID. Do not paste it here.
+
+apps:
+
+  # ── Backend ────────────────────────────────────────────────────────────
+  backend:
+    name: healthsync-backend
+    image: ghcr.io/mpairwe7/healthsync-uganda-backend
+    # Image tag is environment-specific (set in environments/<env>.env as
+    # BACKEND_IMAGE_TAG); the Makefile composes `${image}:${tag}` at deploy.
+    port: 8000
+    replicas: 2          # pilot default; raise to 4 (regional) / 12 (national)
+    command: ""          # use container's default CMD (uvicorn via Dockerfile)
+
+    # Environment variables expected by the application.
+    # Names only — values come from environments/<env>.env at deploy time.
+    env:
+      # Application
+      - APP_ENV                                # e.g. production / staging / pilot
+      - APP_NAME                               # default: healthsync-uganda
+      - LOG_LEVEL                              # INFO in prod, DEBUG in staging
+      - SECRET_KEY                             # 32-byte random — Crane Cloud secret manager preferred
+
+      # Database (Crane Cloud-provisioned Postgres add-on or external)
+      - DATABASE_URL
+
+      # Cache & queue (Crane Cloud-provisioned Redis add-on or external)
+      - REDIS_URL
+
+      # Observability — point at NITA-U OTel collector or skip in pilot
+      - OTEL_EXPORTER_OTLP_ENDPOINT
+      - OTEL_SERVICE_NAME
+      - OTEL_TRACES_SAMPLER
+
+      # External integrations (mocked endpoints in pilot, real URLs in prod)
+      - NIRA_BASE_URL
+      - NIRA_API_KEY
+      - DHIS2_BASE_URL
+      - DHIS2_USERNAME
+      - DHIS2_PASSWORD
+
+      # Resilience tuning (defaults in app/config.py; override per environment)
+      - CIRCUIT_BREAKER_FAILURE_THRESHOLD
+      - CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS
+      - RETRY_MAX_ATTEMPTS
+      - RETRY_BASE_DELAY_MS
+
+      # CORS — comma-separated list; must include the frontend's public URL
+      - CORS_ALLOW_ORIGINS
+
+  # ── Frontend ───────────────────────────────────────────────────────────
+  frontend:
+    name: healthsync-frontend
+    image: ghcr.io/mpairwe7/healthsync-uganda-frontend
+    port: 3000
+    replicas: 2
+    command: ""          # `next start` via Dockerfile CMD
+
+    env:
+      # NEXT_PUBLIC_* keys are baked at build time but the runtime values
+      # also matter for hydration. Set both at build (CI) and deploy (here).
+      - NEXT_PUBLIC_API_BASE_URL               # https://<backend-url>.cranecloud.ug
+      - NEXT_PUBLIC_APP_NAME
+
+# ── Notes ────────────────────────────────────────────────────────────────
+#
+# 1. Images must be reachable from Crane Cloud's pull side. Default registry
+#    is ghcr.io; make the package public or grant Crane Cloud's puller read
+#    access. To switch to Crane Cloud's own registry, change `image:` above
+#    and update the build step in `.github/workflows/ci.yml` (not yet wired).
+#
+# 2. Secrets are passed via `cranecloud apps deploy -e KEY=value` flags. The
+#    values appear briefly on the command line — visible to `ps` on the host
+#    that runs the deploy. For highly sensitive secrets (SECRET_KEY, NIRA_API_KEY,
+#    DHIS2_PASSWORD), prefer Crane Cloud's web-dashboard secret manager and
+#    set them there once, rather than passing them through the CLI repeatedly.
+#
+# 3. Per-environment overrides live in `environments/<env>.env`. Templates
+#    (`*.env.example`) are committed; real `.env` files are gitignored.
+#
+# 4. After a `cranecloud apps deploy`, the CLI returns an APP_ID (UUID).
+#    Save it to environments/<env>.env as BACKEND_APP_ID / FRONTEND_APP_ID
+#    so subsequent `make update-*` calls can target the existing app instead
+#    of creating a duplicate.
