@@ -20,6 +20,36 @@ infra/cranecloud/
 
 ---
 
+## 0. Topology on Crane Cloud
+
+A HealthSync deployment occupies **one Crane Cloud project** per environment, containing:
+
+| Component | How it lives on Crane Cloud | Image / source | Notes |
+| --- | --- | --- | --- |
+| **PostgreSQL** | Managed DaaS — UI: Project → **Databases** → **+ New Database** → PostgreSQL | n/a (provided by platform) | Copy credentials into `DATABASE_URL` in the env file. ([docs.cranecloud.io/databases](https://docs.cranecloud.io/databases/)) |
+| **Redis** | Crane Cloud app — `cranecloud apps deploy` | `redis:7-alpine` (Docker Hub) | Crane Cloud has no managed Redis. Deployed with `--requirepass` + LRU eviction. See "Redis persistence caveat" below. |
+| **Backend (FastAPI)** | Crane Cloud app | `ghcr.io/mpairwe7/healthsync-uganda-backend:<tag>` | Built and pushed by `.github/workflows/build-push.yml`. |
+| **Frontend (Next.js)** | Crane Cloud app | `ghcr.io/mpairwe7/healthsync-uganda-frontend:<tag>` | Built and pushed by the same workflow. |
+| OpenTelemetry collector | Optional external — point `OTEL_EXPORTER_OTLP_ENDPOINT` at any OTLP receiver (Grafana Cloud, NITA-U). Leave blank to disable. | — | Not part of the Crane Cloud project. |
+
+The `make deploy ENV=<env>` target deploys all three Crane Cloud apps (redis → backend → frontend) in order. PostgreSQL must be provisioned manually via the UI **before** `deploy-backend` will succeed.
+
+### Redis persistence caveat
+
+Crane Cloud's public documentation (as of 2026-05-25) does not document persistent volumes for app containers. We therefore treat the Redis app as **ephemeral**. Application state is partitioned so that this is acceptable for pilot scale:
+
+| Redis-resident state | Rebuildable after restart? |
+| --- | --- |
+| Idempotency-key cache (24h) | ✅ Re-populates on first retry |
+| NIRA last-known-good cache | ✅ Re-populates on next NIRA call |
+| Rate-limit token buckets | ✅ Re-populates within the 60s window |
+| Analytics cache (60s TTL) | ✅ Re-populates on first dashboard hit |
+| **DHIS2 outbox queue** | ⚠️ NOT trivially rebuildable — pending pushes are lost on Redis restart |
+
+The DHIS2 outbox is the load-bearing concern. Mitigations:
+- Pilot acceptance: at pilot scale (~30 facilities), losing the outbox once is a small data-loss event we accept. The audit log's structured DHIS2-attempt rows in Loki / SIEM let an operator reconstruct missed pushes manually.
+- Roadmap: a Postgres-backed outbox replica (see `docs/THREAT_MODEL.md` §6 and the ADR backlog) eliminates the concern entirely; the Redis outbox becomes a fast-path cache only.
+
 ## 1. Prerequisites
 
 1. **`cranecloud` CLI installed** and on `$PATH`. See <https://docs.cranecloud.io/>.
@@ -34,30 +64,43 @@ infra/cranecloud/
 
 ## 2. One-time setup per environment
 
-Replace `<env>` with `staging`, `pilot`, or `production`:
+Replace `<env>` with `staging`, `pilot`, or `production`. Steps 1–3 are **prerequisites** that have to complete before the `make deploy` target succeeds.
 
 ```bash
 cd infra/cranecloud
-make init ENV=<env>          # prints the checklist below
+make init ENV=<env>          # prints the same checklist verbosely
 
 # 1) Confirm authentication and find/create the Crane Cloud project
 cranecloud auth user
 cranecloud projects list
 # If the project doesn't exist:
 cranecloud projects create   # suggested name: healthsync-uganda-<env>
+PROJ_ID=$(cranecloud projects list | grep "healthsync-uganda-<env>" | awk '{print $1}')
 
-# 2) Copy the env template and fill in real values
+# 2) Provision PostgreSQL via the Crane Cloud Databases UI
+#    Browser: Crane Cloud dashboard → project → Databases → + New Database
+#            → PostgreSQL → Create
+#    On the resulting panel, click "Copy credentials". You get a connection
+#    string of the form: postgresql://USER:PASS@HOST:5432/DBNAME
+#    Rewrite it to the asyncpg form by inserting "+asyncpg":
+#            postgresql+asyncpg://USER:PASS@HOST:5432/DBNAME
+
+# 3) Generate secrets locally
+SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+REDIS_PASSWORD=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+
+# 4) Copy the env template and fill in real values
 cp environments/<env>.env.example environments/<env>.env
 $EDITOR environments/<env>.env
 # At minimum set:
-#   - CRANECLOUD_PROJECT_ID   (from `cranecloud projects list`)
-#   - SECRET_KEY              (32 random bytes; see step 3 below)
-#   - DATABASE_URL            (postgresql+asyncpg://...)
-#   - REDIS_URL               (redis://...)
-#   - NIRA_*, DHIS2_*         (real URLs for pilot/production; mocks OK for staging)
-
-# 3) Generate a SECRET_KEY (32 random bytes, URL-safe)
-python -c "import secrets; print(secrets.token_urlsafe(32))"
+#   CRANECLOUD_PROJECT_ID = <PROJ_ID from step 1>
+#   REDIS_PASSWORD        = <from step 3>
+#   SECRET_KEY            = <from step 3>
+#   DATABASE_URL          = <from step 2>
+#   REDIS_URL             = redis://:<REDIS_PASSWORD>@<REDIS_HOSTNAME>:6379/0
+#                           (REDIS_HOSTNAME is set automatically by the
+#                            template, e.g. healthsync-redis-staging)
+#   NIRA_*, DHIS2_*       = real URLs for pilot / production; mocks for staging
 ```
 
 The `.env` file stays on your machine (gitignored). It is **the** source of truth for values; the manifest declares which names are expected.
@@ -69,18 +112,23 @@ The `.env` file stays on your machine (gitignored). It is **the** source of trut
 ```bash
 cd infra/cranecloud
 make deploy ENV=<env>
-# Equivalent: make deploy-backend ENV=<env> && make deploy-frontend ENV=<env>
+# Equivalent: make deploy-redis    ENV=<env>
+#          && make deploy-backend  ENV=<env>
+#          && make deploy-frontend ENV=<env>
 ```
 
-The CLI returns an **APP_ID (UUID)** for each app. Capture them back into your `.env`:
+The CLI returns an **APP_ID (UUID)** for each of the three apps. Capture them back into your `.env`:
 
 ```bash
 # environments/<env>.env
+REDIS_APP_ID=<uuid-from-cli>
 BACKEND_APP_ID=<uuid-from-cli>
 FRONTEND_APP_ID=<uuid-from-cli>
 ```
 
 These IDs are what `make update-*` targets later — without them, you'd accidentally create duplicate apps.
+
+The **REDIS_HOSTNAME** entry in your `.env` is the in-project DNS name Crane Cloud assigns to the Redis app (typically the app's `name`). Crane Cloud's web UI confirms this on the Redis app's detail page after deploy. If the actual hostname differs from the default (`healthsync-redis-<env>`), update `REDIS_HOSTNAME` and `REDIS_URL` accordingly, then re-deploy the backend to pick up the corrected URL.
 
 ---
 
@@ -182,6 +230,8 @@ These are configured per environment (Settings → Environments → cranecloud-<
 | `CRANECLOUD_PROJECT_ID`             | `cranecloud projects list` (UUID column)                       | Per-environment value. |
 | `CRANECLOUD_BACKEND_APP_ID`         | After first `make deploy-backend ENV=<env>` — captured from CLI output | Per-environment value. |
 | `CRANECLOUD_FRONTEND_APP_ID`        | After first `make deploy-frontend ENV=<env>`                   | Per-environment value. |
+
+> The Redis app's `APP_ID` is *not* needed as a GitHub secret because the GHA deploy workflow does not roll out Redis (Redis is a one-time deploy; its image changes very rarely). The `REDIS_APP_ID` lives only in the local `environments/<env>.env` and is used by `make update-redis` when the team rotates the password or bumps the Redis version.
 
 Runtime env vars for the apps (DATABASE_URL, SECRET_KEY, NIRA_*, DHIS2_*) live in **Crane Cloud's web-dashboard secret manager**, not in GitHub Actions secrets. The CI deploy only updates the *image*, not the env vars. This minimises the secret surface in GitHub.
 

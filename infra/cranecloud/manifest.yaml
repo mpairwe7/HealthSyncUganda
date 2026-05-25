@@ -21,7 +21,56 @@ project:
   # `cranecloud projects list` and stored in environments/<env>.env as
   # CRANECLOUD_PROJECT_ID. Do not paste it here.
 
+# ── Topology ─────────────────────────────────────────────────────────────
+#
+# A HealthSync deployment on Crane Cloud is one project containing:
+#
+#   1. PostgreSQL — created via Crane Cloud's managed DaaS (UI: Project →
+#      Databases → + New Database → PostgreSQL). NOT deployed as an app.
+#      Connection string + credentials are copied from the DaaS panel into
+#      DATABASE_URL in environments/<env>.env.
+#      Source: https://docs.cranecloud.io/databases/
+#
+#   2. Redis — Crane Cloud has no managed Redis DaaS, so it is deployed
+#      as a Crane Cloud app using the official `redis:7-alpine` image with
+#      `--requirepass` + `--maxmemory-policy allkeys-lru` and optional
+#      append-only persistence. See the `redis` entry below.
+#
+#   3. Backend — FastAPI image from GHCR.
+#
+#   4. Frontend — Next.js image from GHCR.
+#
+# Persistence caveat: Crane Cloud's public docs do not document persistent
+# volumes for app containers (only DaaS persists). We treat Redis as
+# **ephemeral**. The application's resilience patterns (Postgres-of-record
+# audit log, supply hash-chain ledger) are durable; Redis-only state
+# (idempotency cache, rate-limit buckets, NIRA last-known-good cache) is
+# rebuildable on restart. The DHIS2 outbox is the one Redis-resident state
+# that is NOT trivially rebuildable — see docs/RUNBOOK.md RB-03. A
+# Postgres-backed outbox replica is on the roadmap (separate ADR).
+
 apps:
+
+  # ── Redis ──────────────────────────────────────────────────────────────
+  redis:
+    name: healthsync-redis
+    image: redis
+    image_tag: 7-alpine                       # set explicitly; do not use `latest`
+    port: 6379
+    replicas: 1                                # single replica per env; HA via Crane Cloud DaaS not available
+
+    # Redis is launched with explicit flags so it does not start with the
+    # default no-auth config. The password is generated per environment and
+    # appears in environments/<env>.env as REDIS_PASSWORD (gitignored).
+    command: |
+      sh -c "exec redis-server \
+        --requirepass \"$$REDIS_PASSWORD\" \
+        --maxmemory 256mb \
+        --maxmemory-policy allkeys-lru \
+        --appendonly no"
+
+    env:
+      - REDIS_PASSWORD                         # 32+ char random; set per env
 
   # ── Backend ────────────────────────────────────────────────────────────
   backend:
@@ -86,9 +135,10 @@ apps:
 # ── Notes ────────────────────────────────────────────────────────────────
 #
 # 1. Images must be reachable from Crane Cloud's pull side. Default registry
-#    is ghcr.io; make the package public or grant Crane Cloud's puller read
-#    access. To switch to Crane Cloud's own registry, change `image:` above
-#    and update the build step in `.github/workflows/ci.yml` (not yet wired).
+#    is ghcr.io; backend + frontend packages are already public. Redis is
+#    pulled from the official Docker Hub library image. To switch the
+#    backend / frontend to Crane Cloud's own registry, change `image:`
+#    above and update the build step in `.github/workflows/build-push.yml`.
 #
 # 2. Secrets are passed via `cranecloud apps deploy -e KEY=value` flags. The
 #    values appear briefly on the command line — visible to `ps` on the host
@@ -100,6 +150,18 @@ apps:
 #    (`*.env.example`) are committed; real `.env` files are gitignored.
 #
 # 4. After a `cranecloud apps deploy`, the CLI returns an APP_ID (UUID).
-#    Save it to environments/<env>.env as BACKEND_APP_ID / FRONTEND_APP_ID
-#    so subsequent `make update-*` calls can target the existing app instead
-#    of creating a duplicate.
+#    Save it to environments/<env>.env as REDIS_APP_ID / BACKEND_APP_ID /
+#    FRONTEND_APP_ID so subsequent `make update-*` calls can target the
+#    existing app instead of creating a duplicate.
+#
+# 5. The DATABASE_URL value comes from the Crane Cloud Databases panel
+#    (UI-only; no CLI command for DB creation today). After creating the
+#    Postgres DaaS, click "Copy credentials" and paste the connection
+#    string into DATABASE_URL in environments/<env>.env.
+#
+# 6. Inter-app DNS within a Crane Cloud project is not documented in their
+#    public docs as of 2026-05-25. We expose the backend's REDIS_URL via a
+#    field in environments/<env>.env that the operator fills in with the
+#    actual reachable host:port once the Redis app is deployed and the
+#    cluster-internal name is known (Crane Cloud's web UI shows the app's
+#    URL after deploy).
