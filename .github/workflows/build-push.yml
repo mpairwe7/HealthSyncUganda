@@ -22,6 +22,8 @@ concurrency:
 permissions:
   contents: read
   packages: write       # required to push to ghcr.io
+  actions:  write       # required so dispatch-deploy can createWorkflowDispatch
+                        # on deploy-cranecloud.yml via the default GITHUB_TOKEN
 
 env:
   REGISTRY: ghcr.io
