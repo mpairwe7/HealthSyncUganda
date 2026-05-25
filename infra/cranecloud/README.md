@@ -314,6 +314,43 @@ If the rollback target is older than the most recent migration, restore the data
 
 ---
 
+## 10A. Crane Cloud operational quirks (learned 2026-05-25 / 2026-05-26)
+
+These are real platform behaviours that surprised us during the live staging deployment. Document them here so the next operator doesn't burn an hour rediscovering each one.
+
+### Image URL format
+- **No `docker.io/` prefix** — `cranecloud apps deploy --image docker.io/landwind/...` fails with "does not exist or is private". Use the short form `landwind/healthsync-uganda-backend:main`. This is undocumented; the failure message is misleading.
+- Public Docker Hub images work; GHCR (`ghcr.io/...`) does NOT work from the RENU and AHUMAIN ML clusters (only Docker Hub). See §9.1.
+
+### Container ports
+- **Containers must listen on port 3000 internally**, regardless of what you pass to `--port`. Crane Cloud's public ingress proxies HTTPS:443 → container:3000 by convention. Apps that listen on other ports (e.g. uvicorn defaulting to 8000, redis on 6379) are not reachable through the public URL.
+- Backend therefore needs `--command 'uvicorn app.main:app --host 0.0.0.0 --port 3000 ...'` (override the Dockerfile's port-8000 CMD).
+- Postgres and Redis bind to their canonical ports (5432, 6379) inside the container; the K8s **service** still seems to use port 3000 as the publicly-reported port (cranecloud's "Internal Url" always renders `:3000` for any app). Use **port 3000** in `DATABASE_URL` / `REDIS_URL` when referring to those services from another pod.
+
+### Env-var updates
+- **`cranecloud apps update -e KEY=value` does NOT actually update env vars** (or at least doesn't restart the pod to pick them up). The CLI reports "App updated successfully" but `cranecloud apps info` shows the OLD env. To change env vars, you must **delete and redeploy** the app. This changes the public URL hex segment, which breaks any links you've shared.
+- Implication for the CI/CD workflow: `deploy-cranecloud.yml` only updates the **image** via `apps update --image`; env changes still require a manual delete-and-redeploy.
+
+### CLI argument idiosyncrasies
+- `cranecloud apps delete <APP_ID>` and `cranecloud projects delete <PROJECT_ID>` use **positional** arguments, not `--id`. The error message helpfully tells you so.
+- `cranecloud projects create --cluster_id <UUID>` **fails with a simplejson serialisation error** on the CLI's own UUID type. Workaround: `cranecloud clusters use-cluster <UUID>` first to set the default cluster, then `cranecloud projects create` (no `--cluster_id` flag).
+- `cranecloud auth user` and other commands **read env vars from a secret-storage helper**. In non-tty / CI runners the default `keyring.backends.null.Keyring` silently drops writes; the workflow must set `PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring` (provided by the `keyrings.alt` pip package) for the token-file path to work.
+
+### Status reporting
+- Newly-deployed TCP services (Postgres, Redis) initially show **`failed`** for ~60 seconds, then flip to `running` once the readiness probe settles. Don't delete a "failed" app immediately after deploy — wait 1–2 minutes.
+- A `running` app can still 502 on the public URL for ~30s after deploy while the ingress catches up.
+- An app that's been recreated gets a NEW URL hex (e.g. `…-9a1442da.renu-01.cranecloud.io` → `…-9b4ecff1.…`). The Internal Url's hex also changes. **Any URL stored elsewhere (env vars in other apps, GitHub Actions secrets, README links) must be updated.**
+
+### Cluster availability
+- Three clusters listed by `cranecloud clusters list`: `makerere-1`, `Research and Education Network for Uganda` (RENU), `AHUMAIN ML`. The `makerere-1` cluster is **platform-disabled** — `projects create` against it returns "cluster is disabled". Only RENU and AHUMAIN ML are usable on the current account.
+
+### Persistence
+- **No persistent volumes for app containers** are documented for any cluster (as of 2026-05-26). Treat Postgres and Redis as **ephemeral**; pod restart = fresh data dir. Operate `pg_dump → external object store` per [BACKUP_RESTORE.md](../../docs/BACKUP_RESTORE.md) before any environment holds real PHI.
+- Crane Cloud's managed **PostgreSQL DaaS** does persist (separate from app containers). See §0.2 for the fallback path.
+
+### Secrets exposure
+- **`cranecloud apps info` displays env-var values in plaintext** — including secrets like `SECRET_KEY` and password-bearing connection strings. Anyone with `cranecloud apps info <APP_ID>` access can read these. Mitigation: rotate secrets when staff with project access leave; minimise the number of operators with the cranecloud token.
+
 ## 11. Common errors
 
 | Symptom | Cause | Fix |
