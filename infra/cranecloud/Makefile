@@ -31,8 +31,8 @@ else
   C_RESET  :=
 endif
 
-.PHONY: help init env-check deploy deploy-redis deploy-backend deploy-frontend \
-        update-redis update-backend update-frontend list info logout clean
+.PHONY: help init env-check deploy deploy-postgres deploy-redis deploy-backend deploy-frontend \
+        update-postgres update-redis update-backend update-frontend list info logout clean
 
 help:  ## Show this help (default target)
 	@echo "$(C_BLUE)HealthSync Uganda — Crane Cloud deploy$(C_RESET)"
@@ -74,14 +74,32 @@ env-check:  ## Verify the env file exists and is readable
 	fi
 	@printf "$(C_GREEN)✓$(C_RESET) $(ENV_FILE) present\n"
 
-deploy: env-check deploy-redis deploy-backend deploy-frontend  ## Deploy redis + backend + frontend
+deploy: env-check deploy-postgres deploy-redis deploy-backend deploy-frontend  ## Deploy postgres + redis + backend + frontend
 	@printf "$(C_GREEN)✓$(C_RESET) Deploy complete for ENV=$(ENV)\n"
 	@printf "Capture the returned APP_IDs above into $(ENV_FILE) as\n"
-	@printf "  REDIS_APP_ID=<uuid>\n  BACKEND_APP_ID=<uuid>\n  FRONTEND_APP_ID=<uuid>\n"
-	@printf "Subsequent rollouts use $(C_YELLOW)make update-{redis,backend,frontend}$(C_RESET).\n"
-	@printf "Reminder: Postgres comes from Crane Cloud DaaS (Project → Databases),\n"
-	@printf "not from this Makefile. Paste its connection string into $(C_YELLOW)DATABASE_URL$(C_RESET)\n"
-	@printf "in $(ENV_FILE) before $(C_YELLOW)deploy-backend$(C_RESET) succeeds.\n"
+	@printf "  POSTGRES_APP_ID=<uuid>\n  REDIS_APP_ID=<uuid>\n  BACKEND_APP_ID=<uuid>\n  FRONTEND_APP_ID=<uuid>\n"
+	@printf "Subsequent rollouts use $(C_YELLOW)make update-{postgres,redis,backend,frontend}$(C_RESET).\n"
+	@printf "$(C_RED)REMINDER:$(C_RESET) Crane Cloud apps do NOT have documented persistent volumes.\n"
+	@printf "Schedule a pg_dump → external object-store backup before this env holds real PHI.\n"
+	@printf "See infra/cranecloud/README.md \"Persistence caveat for self-hosted DB\".\n"
+
+deploy-postgres: env-check  ## Deploy a Postgres app (custom image with init.sql baked in)
+	@printf "$(C_BLUE)→ Deploying Postgres (ENV=$(ENV))$(C_RESET)\n"
+	@set -a; . ./$(ENV_FILE); set +a; \
+	 if [ -z "$$POSTGRES_PASSWORD" ]; then \
+	   printf "$(C_RED)POSTGRES_PASSWORD is empty in $(ENV_FILE).$(C_RESET) Generate one:\n"; \
+	   printf "  python3 -c 'import secrets; print(secrets.token_urlsafe(32))'\n"; \
+	   exit 1; \
+	 fi; \
+	 cranecloud apps deploy \
+	   --project_id "$$CRANECLOUD_PROJECT_ID" \
+	   --name "$$POSTGRES_APP_NAME" \
+	   --image "$$POSTGRES_IMAGE:$$POSTGRES_IMAGE_TAG" \
+	   --port "$$POSTGRES_PORT" \
+	   --replicas "$$POSTGRES_REPLICAS" \
+	   -e "POSTGRES_USER=$$POSTGRES_USER" \
+	   -e "POSTGRES_PASSWORD=$$POSTGRES_PASSWORD" \
+	   -e "POSTGRES_DB=$$POSTGRES_DB"
 
 deploy-redis: env-check  ## Deploy a Redis app (redis:7-alpine + requirepass + LRU)
 	@printf "$(C_BLUE)→ Deploying Redis (ENV=$(ENV))$(C_RESET)\n"
@@ -140,6 +158,19 @@ deploy-frontend: env-check  ## Deploy the Next.js frontend (one-time per env)
 	   --replicas "$$FRONTEND_REPLICAS" \
 	   -e "NEXT_PUBLIC_API_BASE_URL=$$NEXT_PUBLIC_API_BASE_URL" \
 	   -e "NEXT_PUBLIC_APP_NAME=$$NEXT_PUBLIC_APP_NAME"
+
+update-postgres: env-check  ## Re-roll the existing Postgres app (image bump only — env changes require recreate)
+	@set -a; . ./$(ENV_FILE); set +a; \
+	 if [ -z "$$POSTGRES_APP_ID" ]; then \
+	   printf "$(C_RED)POSTGRES_APP_ID is not set in $(ENV_FILE).$(C_RESET)\n"; \
+	   printf "Run $(C_YELLOW)make list ENV=$(ENV)$(C_RESET) to find it.\n"; \
+	   exit 1; \
+	 fi; \
+	 printf "$(C_BLUE)→ Updating Postgres $$POSTGRES_APP_ID (ENV=$(ENV))$(C_RESET)\n"; \
+	 printf "$(C_YELLOW)WARNING:$(C_RESET) without persistent volumes this restarts on a fresh data dir.\n"; \
+	 printf "Confirm a recent pg_dump exists before proceeding.\n"; \
+	 cranecloud apps update "$$POSTGRES_APP_ID" \
+	   --image "$$POSTGRES_IMAGE:$$POSTGRES_IMAGE_TAG"
 
 update-redis: env-check  ## Re-roll the existing Redis app (e.g. password rotation)
 	@set -a; . ./$(ENV_FILE); set +a; \

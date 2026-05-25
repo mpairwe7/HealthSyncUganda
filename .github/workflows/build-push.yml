@@ -43,6 +43,10 @@ jobs:
             context: frontend
             dockerfile: frontend/Dockerfile
             image_suffix: healthsync-uganda-frontend
+          - app: postgres
+            context: infra/postgres
+            dockerfile: infra/postgres/Dockerfile
+            image_suffix: healthsync-uganda-postgres
 
     name: ${{ matrix.app }}
     steps:

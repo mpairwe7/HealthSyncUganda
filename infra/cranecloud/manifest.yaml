@@ -23,33 +23,63 @@ project:
 
 # ── Topology ─────────────────────────────────────────────────────────────
 #
-# A HealthSync deployment on Crane Cloud is one project containing:
+# A HealthSync deployment on Crane Cloud is one project containing four
+# Crane Cloud apps, in startup order:
 #
-#   1. PostgreSQL — created via Crane Cloud's managed DaaS (UI: Project →
-#      Databases → + New Database → PostgreSQL). NOT deployed as an app.
-#      Connection string + credentials are copied from the DaaS panel into
-#      DATABASE_URL in environments/<env>.env.
-#      Source: https://docs.cranecloud.io/databases/
+#   1. PostgreSQL — deployed as a Crane Cloud app from a custom image
+#      (`postgres:16-alpine` + baked-in init.sql for the extensions
+#      pgcrypto/pg_trgm/btree_gin). NOT the Crane Cloud DaaS — see the
+#      "Self-hosted vs DaaS" decision in infra/cranecloud/README.md §0.1.
+#      Source image built by .github/workflows/build-push.yml.
 #
 #   2. Redis — Crane Cloud has no managed Redis DaaS, so it is deployed
-#      as a Crane Cloud app using the official `redis:7-alpine` image with
-#      `--requirepass` + `--maxmemory-policy allkeys-lru` and optional
-#      append-only persistence. See the `redis` entry below.
+#      as a Crane Cloud app using the official `redis:7-alpine` image
+#      with `--requirepass` + `--maxmemory-policy allkeys-lru`.
 #
 #   3. Backend — FastAPI image from GHCR.
 #
 #   4. Frontend — Next.js image from GHCR.
 #
-# Persistence caveat: Crane Cloud's public docs do not document persistent
-# volumes for app containers (only DaaS persists). We treat Redis as
-# **ephemeral**. The application's resilience patterns (Postgres-of-record
-# audit log, supply hash-chain ledger) are durable; Redis-only state
-# (idempotency cache, rate-limit buckets, NIRA last-known-good cache) is
-# rebuildable on restart. The DHIS2 outbox is the one Redis-resident state
-# that is NOT trivially rebuildable — see docs/RUNBOOK.md RB-03. A
-# Postgres-backed outbox replica is on the roadmap (separate ADR).
+# All four apps live in the same Crane Cloud project. Inter-app DNS
+# resolves by app name (operator confirms the actual hostname from the
+# Crane Cloud UI on each app's detail page after first deploy).
+#
+# Persistence caveat (READ BEFORE DEPLOY): Crane Cloud's public docs
+# (2026-05-25) do not document persistent volumes for app containers.
+# Both `postgres` and `redis` are therefore **assumed ephemeral**. For
+# any environment that holds real PHI:
+#
+#   - Operate a scheduled pg_dump → external object store (S3-compatible)
+#     per docs/BACKUP_RESTORE.md.
+#   - Monitor the Postgres app's pod restarts; any restart is a data-loss
+#     event until persistent storage is confirmed.
+#   - For pilot/production, consider:
+#       (a) switching `postgres` back to Crane Cloud DaaS (UI: Project →
+#           Databases → + New Database → PostgreSQL) — durable storage
+#           managed by the platform, AND/OR
+#       (b) migrating to NITA-U Government Cloud where persistent volumes
+#           are first-class.
+#
+# Redis ephemerality is a smaller concern — most Redis state in
+# HealthSync is rebuildable (idempotency cache, rate-limit buckets, NIRA
+# last-known-good cache). The DHIS2 outbox is the load-bearing exception;
+# see docs/RUNBOOK.md RB-03 and the Postgres-backed outbox replica on the
+# THREAT_MODEL.md §6 roadmap.
 
 apps:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────
+  postgres:
+    name: healthsync-postgres
+    image: ghcr.io/mpairwe7/healthsync-uganda-postgres
+    image_tag: main                            # tracks main branch; pin to v* in production
+    port: 5432
+    replicas: 1                                # NO HA — Crane Cloud apps don't support clustering today
+
+    env:
+      - POSTGRES_USER                          # default: healthsync
+      - POSTGRES_PASSWORD                      # 32+ char random; rotate per SECURITY.md
+      - POSTGRES_DB                            # default: healthsync
 
   # ── Redis ──────────────────────────────────────────────────────────────
   redis:

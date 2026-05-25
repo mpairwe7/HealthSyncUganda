@@ -22,21 +22,28 @@ infra/cranecloud/
 
 ## 0. Topology on Crane Cloud
 
-A HealthSync deployment occupies **one Crane Cloud project** per environment, containing:
+A HealthSync deployment occupies **one Crane Cloud project** per environment, with all four components running as Crane Cloud apps in the same project. This mirrors the local `docker-compose.yml` topology — every component is local to the deployment unit; nothing is an external dependency.
 
 | Component | How it lives on Crane Cloud | Image / source | Notes |
 | --- | --- | --- | --- |
-| **PostgreSQL** | Managed DaaS — UI: Project → **Databases** → **+ New Database** → PostgreSQL | n/a (provided by platform) | Copy credentials into `DATABASE_URL` in the env file. ([docs.cranecloud.io/databases](https://docs.cranecloud.io/databases/)) |
-| **Redis** | Crane Cloud app — `cranecloud apps deploy` | `redis:7-alpine` (Docker Hub) | Crane Cloud has no managed Redis. Deployed with `--requirepass` + LRU eviction. See "Redis persistence caveat" below. |
+| **PostgreSQL** | Crane Cloud app — `cranecloud apps deploy` | `ghcr.io/mpairwe7/healthsync-uganda-postgres:<tag>` (custom image: `postgres:16-alpine` + baked-in `init.sql` for pgcrypto / pg_trgm / btree_gin) | **Self-hosted, not DaaS** — see §0.1 below for the durability trade-off and §0.2 for the DaaS fallback. |
+| **Redis** | Crane Cloud app — `cranecloud apps deploy` | `redis:7-alpine` (Docker Hub) | Deployed with `--requirepass` + 256 MB cap + LRU eviction. |
 | **Backend (FastAPI)** | Crane Cloud app | `ghcr.io/mpairwe7/healthsync-uganda-backend:<tag>` | Built and pushed by `.github/workflows/build-push.yml`. |
 | **Frontend (Next.js)** | Crane Cloud app | `ghcr.io/mpairwe7/healthsync-uganda-frontend:<tag>` | Built and pushed by the same workflow. |
-| OpenTelemetry collector | Optional external — point `OTEL_EXPORTER_OTLP_ENDPOINT` at any OTLP receiver (Grafana Cloud, NITA-U). Leave blank to disable. | — | Not part of the Crane Cloud project. |
+| OpenTelemetry collector | Optional external — point `OTEL_EXPORTER_OTLP_ENDPOINT` at any OTLP receiver. Leave blank to disable. | — | Not part of the Crane Cloud project. |
 
-The `make deploy ENV=<env>` target deploys all three Crane Cloud apps (redis → backend → frontend) in order. PostgreSQL must be provisioned manually via the UI **before** `deploy-backend` will succeed.
+The `make deploy ENV=<env>` target deploys all four Crane Cloud apps in order: **postgres → redis → backend → frontend**. The backend/frontend depend on postgres + redis being reachable; the chain order matters.
 
-### Redis persistence caveat
+### 0.1 Persistence caveat for self-hosted DB & cache (READ BEFORE DEPLOY)
 
-Crane Cloud's public documentation (as of 2026-05-25) does not document persistent volumes for app containers. We therefore treat the Redis app as **ephemeral**. Application state is partitioned so that this is acceptable for pilot scale:
+Crane Cloud's public documentation (as of 2026-05-25, [docs.cranecloud.io](https://docs.cranecloud.io/)) does not document persistent volumes for app containers. We therefore treat both `postgres` and `redis` as **ephemeral** — any pod restart resets state to the image's initial state.
+
+For **Postgres**, ephemerality is severe:
+
+- A pod restart drops every patient record, encounter, observation, consent grant, audit-log row, and supply ledger entry created since the last `pg_dump`.
+- For a health-records system this is **unacceptable in production** without persistent storage.
+
+For **Redis**, ephemerality is bounded:
 
 | Redis-resident state | Rebuildable after restart? |
 | --- | --- |
@@ -44,11 +51,29 @@ Crane Cloud's public documentation (as of 2026-05-25) does not document persiste
 | NIRA last-known-good cache | ✅ Re-populates on next NIRA call |
 | Rate-limit token buckets | ✅ Re-populates within the 60s window |
 | Analytics cache (60s TTL) | ✅ Re-populates on first dashboard hit |
-| **DHIS2 outbox queue** | ⚠️ NOT trivially rebuildable — pending pushes are lost on Redis restart |
+| **DHIS2 outbox queue** | ⚠️ NOT trivially rebuildable — pending pushes are lost on Redis restart (see `docs/RUNBOOK.md` RB-03) |
 
-The DHIS2 outbox is the load-bearing concern. Mitigations:
-- Pilot acceptance: at pilot scale (~30 facilities), losing the outbox once is a small data-loss event we accept. The audit log's structured DHIS2-attempt rows in Loki / SIEM let an operator reconstruct missed pushes manually.
-- Roadmap: a Postgres-backed outbox replica (see `docs/THREAT_MODEL.md` §6 and the ADR backlog) eliminates the concern entirely; the Redis outbox becomes a fast-path cache only.
+Operating discipline for the self-hosted shape:
+
+1. **Scheduled `pg_dump`** to external object storage (S3-compatible) per [`docs/BACKUP_RESTORE.md`](../../docs/BACKUP_RESTORE.md). Cadence: 15-min WAL + daily logical dump (RPO 15 min target).
+2. **Postgres pod-restart alert** — any restart of the Postgres app triggers SEV-1 alert (treat as a potential data-loss event until a fresh dump confirms otherwise).
+3. **Avoid `make update-postgres`** in production unless a recent dump exists; the Makefile prints a warning.
+
+### 0.2 Fallback to Crane Cloud's managed PostgreSQL DaaS
+
+If self-hosted Postgres turns out to be unsuitable (no persistent volumes confirmed; data loss observed on restart; pilot acceptance review fails), the documented alternative is Crane Cloud's managed PostgreSQL DaaS:
+
+> Crane Cloud DaaS: UI: Project → **Databases** → **+ New Database** → PostgreSQL → Create. Copy credentials. ([docs.cranecloud.io/databases](https://docs.cranecloud.io/databases/))
+
+Switching back to DaaS requires:
+
+1. Delete the self-hosted `healthsync-postgres-*` Crane Cloud app (`cranecloud apps delete --id $POSTGRES_APP_ID`).
+2. Provision the Postgres DaaS via the UI; copy the connection string.
+3. Update `DATABASE_URL` in `environments/<env>.env` to the DaaS connection string (rewriting `postgresql://` to `postgresql+asyncpg://`).
+4. `make update-backend ENV=<env>` to roll the backend onto the new database.
+5. Restore from the most recent `pg_dump` into the DaaS instance before re-enabling writes.
+
+For longer-term durability the right answer is NITA-U Government Cloud, where persistent storage is first-class — tracked on the roadmap.
 
 ## 1. Prerequisites
 
@@ -77,29 +102,23 @@ cranecloud projects list
 cranecloud projects create   # suggested name: healthsync-uganda-<env>
 PROJ_ID=$(cranecloud projects list | grep "healthsync-uganda-<env>" | awk '{print $1}')
 
-# 2) Provision PostgreSQL via the Crane Cloud Databases UI
-#    Browser: Crane Cloud dashboard → project → Databases → + New Database
-#            → PostgreSQL → Create
-#    On the resulting panel, click "Copy credentials". You get a connection
-#    string of the form: postgresql://USER:PASS@HOST:5432/DBNAME
-#    Rewrite it to the asyncpg form by inserting "+asyncpg":
-#            postgresql+asyncpg://USER:PASS@HOST:5432/DBNAME
-
-# 3) Generate secrets locally
+# 2) Generate secrets locally
 SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+POSTGRES_PASSWORD=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 REDIS_PASSWORD=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 
-# 4) Copy the env template and fill in real values
+# 3) Copy the env template and fill in real values
 cp environments/<env>.env.example environments/<env>.env
 $EDITOR environments/<env>.env
 # At minimum set:
 #   CRANECLOUD_PROJECT_ID = <PROJ_ID from step 1>
-#   REDIS_PASSWORD        = <from step 3>
-#   SECRET_KEY            = <from step 3>
-#   DATABASE_URL          = <from step 2>
+#   POSTGRES_PASSWORD     = <from step 2>
+#   REDIS_PASSWORD        = <from step 2>
+#   SECRET_KEY            = <from step 2>
+#   DATABASE_URL          = postgresql+asyncpg://healthsync:<POSTGRES_PASSWORD>@<POSTGRES_HOSTNAME>:5432/healthsync
+#                           (POSTGRES_HOSTNAME is set automatically by the
+#                            template, e.g. healthsync-postgres-staging)
 #   REDIS_URL             = redis://:<REDIS_PASSWORD>@<REDIS_HOSTNAME>:6379/0
-#                           (REDIS_HOSTNAME is set automatically by the
-#                            template, e.g. healthsync-redis-staging)
 #   NIRA_*, DHIS2_*       = real URLs for pilot / production; mocks for staging
 ```
 
@@ -112,19 +131,30 @@ The `.env` file stays on your machine (gitignored). It is **the** source of trut
 ```bash
 cd infra/cranecloud
 make deploy ENV=<env>
-# Equivalent: make deploy-redis    ENV=<env>
+# Equivalent: make deploy-postgres ENV=<env>
+#          && make deploy-redis    ENV=<env>
 #          && make deploy-backend  ENV=<env>
 #          && make deploy-frontend ENV=<env>
 ```
 
-The CLI returns an **APP_ID (UUID)** for each of the three apps. Capture them back into your `.env`:
+The CLI returns an **APP_ID (UUID)** for each of the four apps. Capture them back into your `.env`:
 
 ```bash
 # environments/<env>.env
+POSTGRES_APP_ID=<uuid-from-cli>
 REDIS_APP_ID=<uuid-from-cli>
 BACKEND_APP_ID=<uuid-from-cli>
 FRONTEND_APP_ID=<uuid-from-cli>
 ```
+
+After `deploy-postgres` completes, run the Alembic migrations against the new database **before** `deploy-backend` reads/writes:
+
+```bash
+# from the repo root, with DATABASE_URL pointing at the new Postgres app
+cd backend && uv run alembic upgrade head
+```
+
+(Alternatively the backend can run migrations on startup — that's a future enhancement; today migrations are operator-initiated.)
 
 These IDs are what `make update-*` targets later — without them, you'd accidentally create duplicate apps.
 
