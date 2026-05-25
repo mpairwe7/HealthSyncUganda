@@ -1,9 +1,15 @@
-name: Build & push images (GHCR)
+name: Build & push images (Docker Hub)
 
 # Triggers
 #   • push to main         → tagged with branch + short-sha
 #   • push of v* tag       → tagged with version + latest (semver release)
 #   • workflow_dispatch    → manual rebuild from any ref
+#
+# Why Docker Hub (not GHCR): Crane Cloud's RENU and AHUMAIN ML clusters
+# (the two available on the project's account) cannot pull from ghcr.io —
+# confirmed by control-deploy on 2026-05-26. Docker Hub pulls work cleanly
+# (e.g. OptiscanAI-RENU runs landwind/optiscan-ai). Until Crane Cloud
+# enables GHCR pulls, Docker Hub is the registry of record for this project.
 on:
   push:
     branches: [main]
@@ -21,14 +27,15 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write       # required to push to ghcr.io
   actions:  write       # required so dispatch-deploy can createWorkflowDispatch
                         # on deploy-cranecloud.yml via the default GITHUB_TOKEN
 
 env:
-  REGISTRY: ghcr.io
-  # Org/repo prefix on GHCR. Inherited from the workflow file's repo by default.
-  IMAGE_OWNER: ${{ github.repository_owner }}
+  REGISTRY: docker.io
+  # Docker Hub username — overridable via repo variable DOCKERHUB_USER.
+  # Defaults to `mpairwe7` because that's the GitHub username and the
+  # natural Docker Hub username to mirror.
+  IMAGE_OWNER: ${{ vars.DOCKERHUB_USER || 'mpairwe7' }}
 
 jobs:
   build:
@@ -58,12 +65,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ env.IMAGE_OWNER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # Derives tag list deterministically:
       #   - branch name (e.g. main)
@@ -74,6 +81,8 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
+          # Docker Hub images do not need the `docker.io/` prefix in the
+          # canonical name, but we keep it for clarity in the env files.
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ matrix.image_suffix }}
           tags: |
             type=ref,event=branch
@@ -105,7 +114,7 @@ jobs:
 
       - name: Image summary
         run: |
-          echo "### ${{ matrix.app }} image pushed" >> $GITHUB_STEP_SUMMARY
+          echo "### ${{ matrix.app }} image pushed (Docker Hub)" >> $GITHUB_STEP_SUMMARY
           echo "- digest: \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- tags:" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
@@ -113,8 +122,9 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
 
   # Trigger Crane Cloud deploy automatically after a successful push of either
-  # branch-main or a v* tag. Pilot is the default target; production deploys
-  # are operator-triggered via workflow_dispatch on deploy-cranecloud.yml.
+  # branch-main or a v* tag. Staging is the default target on main; pilot on
+  # v* tags. Production deploys are operator-triggered via workflow_dispatch
+  # on deploy-cranecloud.yml — never automatic.
   dispatch-deploy:
     needs: build
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')

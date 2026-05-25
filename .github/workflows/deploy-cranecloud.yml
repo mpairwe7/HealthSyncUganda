@@ -124,7 +124,7 @@ jobs:
         if: inputs.target == 'backend' || inputs.target == 'both'
         env:
           CRANECLOUD_BACKEND_APP_ID: ${{ secrets.CRANECLOUD_BACKEND_APP_ID }}
-          IMAGE: ghcr.io/${{ github.repository_owner }}/healthsync-uganda-backend:${{ inputs.image_tag }}
+          IMAGE: docker.io/${{ vars.DOCKERHUB_USER || 'mpairwe7' }}/healthsync-uganda-backend:${{ inputs.image_tag }}
         run: |
           set -euo pipefail
           echo "→ Updating backend ($CRANECLOUD_BACKEND_APP_ID) to image: $IMAGE"
@@ -135,7 +135,7 @@ jobs:
         if: inputs.target == 'frontend' || inputs.target == 'both'
         env:
           CRANECLOUD_FRONTEND_APP_ID: ${{ secrets.CRANECLOUD_FRONTEND_APP_ID }}
-          IMAGE: ghcr.io/${{ github.repository_owner }}/healthsync-uganda-frontend:${{ inputs.image_tag }}
+          IMAGE: docker.io/${{ vars.DOCKERHUB_USER || 'mpairwe7' }}/healthsync-uganda-frontend:${{ inputs.image_tag }}
         run: |
           set -euo pipefail
           echo "→ Updating frontend ($CRANECLOUD_FRONTEND_APP_ID) to image: $IMAGE"

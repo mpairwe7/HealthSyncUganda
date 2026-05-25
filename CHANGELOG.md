@@ -15,6 +15,9 @@ This file is the canonical, audit-facing history of user-visible changes. It is 
 
 ## [Unreleased]
 
+### Changed (CI/CD)
+- `build-push.yml` and `deploy-cranecloud.yml` now use **Docker Hub** (`docker.io/mpairwe7/...`) instead of GHCR. Crane Cloud's RENU and AHUMAIN ML clusters cannot pull from `ghcr.io` (confirmed 2026-05-26 via control-deploy); Docker Hub pulls work cleanly. Requires repo variable `DOCKERHUB_USER` + repo secret `DOCKERHUB_TOKEN`.
+
 ### Known follow-ups (pre-pilot)
 
 - **Wire up Alembic migrations.** `alembic>=1.13.0` is in `backend/pyproject.toml` and `uv.lock` but `alembic.ini` / `env.py` / migration revisions do not exist yet. Until then the backend uses `Base.metadata.create_all` on startup (`auto_create_schema=true` in `Settings`) — idempotent for adding new tables but does not handle ALTERs. This is acceptable for the pilot's initial fresh-DB deploy but must be replaced with real migrations before production schema evolution.

@@ -26,10 +26,10 @@ A HealthSync deployment occupies **one Crane Cloud project** per environment, wi
 
 | Component | How it lives on Crane Cloud | Image / source | Notes |
 | --- | --- | --- | --- |
-| **PostgreSQL** | Crane Cloud app — `cranecloud apps deploy` | `ghcr.io/mpairwe7/healthsync-uganda-postgres:<tag>` (custom image: `postgres:16-alpine` + baked-in `init.sql` for pgcrypto / pg_trgm / btree_gin) | **Self-hosted, not DaaS** — see §0.1 below for the durability trade-off and §0.2 for the DaaS fallback. |
+| **PostgreSQL** | Crane Cloud app — `cranecloud apps deploy` | `docker.io/mpairwe7/healthsync-uganda-postgres:<tag>` (custom image: `postgres:16-alpine` + baked-in `init.sql` for pgcrypto / pg_trgm / btree_gin) | **Self-hosted, not DaaS** — see §0.1 below for the durability trade-off and §0.2 for the DaaS fallback. |
 | **Redis** | Crane Cloud app — `cranecloud apps deploy` | `redis:7-alpine` (Docker Hub) | Deployed with `--requirepass` + 256 MB cap + LRU eviction. |
-| **Backend (FastAPI)** | Crane Cloud app | `ghcr.io/mpairwe7/healthsync-uganda-backend:<tag>` | Built and pushed by `.github/workflows/build-push.yml`. |
-| **Frontend (Next.js)** | Crane Cloud app | `ghcr.io/mpairwe7/healthsync-uganda-frontend:<tag>` | Built and pushed by the same workflow. |
+| **Backend (FastAPI)** | Crane Cloud app | `docker.io/mpairwe7/healthsync-uganda-backend:<tag>` | Built and pushed by `.github/workflows/build-push.yml`. |
+| **Frontend (Next.js)** | Crane Cloud app | `docker.io/mpairwe7/healthsync-uganda-frontend:<tag>` | Built and pushed by the same workflow. |
 | OpenTelemetry collector | Optional external — point `OTEL_EXPORTER_OTLP_ENDPOINT` at any OTLP receiver. Leave blank to disable. | — | Not part of the Crane Cloud project. |
 
 The `make deploy ENV=<env>` target deploys all four Crane Cloud apps in order: **postgres → redis → backend → frontend**. The backend/frontend depend on postgres + redis being reachable; the chain order matters.
@@ -79,11 +79,12 @@ For longer-term durability the right answer is NITA-U Government Cloud, where pe
 
 1. **`cranecloud` CLI installed** and on `$PATH`. See <https://docs.cranecloud.io/>.
 2. **Authenticated** via `cranecloud auth login`. The session token lives in the OS keyring; deploys must therefore run from an **interactive shell with keyring access** (not from CI, not from a non-tty session — that's why CI does not deploy automatically).
-3. **Container images** for the two apps are reachable from Crane Cloud's pull side:
-   - `ghcr.io/mpairwe7/healthsync-uganda-backend:<tag>`
-   - `ghcr.io/mpairwe7/healthsync-uganda-frontend:<tag>`
-   - Either make the GHCR packages public, or grant Crane Cloud's registry-puller read access.
-4. **Postgres + Redis** are provisioned — either as Crane Cloud add-ons (recommended for pilot) or pointing at external managed services. You'll paste the `postgresql+asyncpg://…` and `redis://…` URLs into the `.env` file.
+3. **Container images** published to Docker Hub (Crane Cloud's RENU/AHUMAIN ML clusters do not pull from `ghcr.io` — see §9.1 for context):
+   - `docker.io/mpairwe7/healthsync-uganda-postgres:<tag>`
+   - `docker.io/mpairwe7/healthsync-uganda-backend:<tag>`
+   - `docker.io/mpairwe7/healthsync-uganda-frontend:<tag>`
+   - Repos under your Docker Hub account must be **Public** (or paste a private-image PAT into the Crane Cloud "Private Image" deploy form per app).
+4. **Redis** is deployed from the official upstream `redis:7-alpine` (Docker Hub). **Postgres** is the custom image above. Both run as Crane Cloud apps, not external managed services. See §0.1 for the durability caveat.
 
 ---
 
@@ -242,8 +243,9 @@ Two GitHub Actions workflows automate the parts of the rollout that are safe to 
 ### 9.1 `.github/workflows/build-push.yml` — fully automated
 
 - **Triggers:** push to `main`, push of `v*` tags, manual `workflow_dispatch`.
-- **What it does:** builds `backend/` and `frontend/` images via `docker/build-push-action` and pushes to `ghcr.io/mpairwe7/healthsync-uganda-{backend,frontend}` with derived tags (`main`, `sha-<short>`, version, `latest` on non-prerelease releases).
-- **Auth:** `GITHUB_TOKEN` (no extra secret).
+- **What it does:** builds `backend/`, `frontend/`, and `infra/postgres/` images via `docker/build-push-action` and pushes to `docker.io/<user>/healthsync-uganda-{backend,frontend,postgres}` with derived tags (`main`, `sha-<short>`, version, `latest` on non-prerelease releases).
+- **Registry choice — Docker Hub, not GHCR.** Crane Cloud's RENU and AHUMAIN ML clusters (the two available on the project's account as of 2026-05-26) cannot pull from `ghcr.io`; identical-shape pulls from Docker Hub work cleanly. Until Crane Cloud enables GHCR access on the relevant clusters, Docker Hub is the registry of record.
+- **Auth:** repo variable `DOCKERHUB_USER` (defaults to `mpairwe7`) + repo secret `DOCKERHUB_TOKEN` (Docker Hub PAT scoped Read & Write on Repos).
 - **After successful build on `main` / `v*`:** dispatches `deploy-cranecloud.yml` automatically — `main` → `staging`, `v*` → `pilot`. Production deploys are *never* automatic; they are operator-triggered via `workflow_dispatch`.
 
 ### 9.2 `.github/workflows/deploy-cranecloud.yml` — operator-led
@@ -256,7 +258,16 @@ Two GitHub Actions workflows automate the parts of the rollout that are safe to 
 
 ### 9.3 Required GitHub secrets
 
-These are configured per environment (Settings → Environments → cranecloud-<env> → Environment secrets). They are *not* repository-wide secrets because each environment has distinct values.
+#### Repository-wide (used by `build-push.yml`)
+
+| Setting | Type | Source | Notes |
+| --- | --- | --- | --- |
+| `DOCKERHUB_USER` | **variable** (not secret) | Your Docker Hub username; defaults to `mpairwe7` if unset | Plain identifier; visible in workflow logs by design |
+| `DOCKERHUB_TOKEN` | **secret** | <https://hub.docker.com/settings/security/personal-access-tokens> → New PAT → **Read & Write** on `Repos` | Treat as bearer credential; rotate annually or on incident |
+
+#### Per environment (used by `deploy-cranecloud.yml`)
+
+Configured per environment (Settings → Environments → cranecloud-<env> → Environment secrets). They are *not* repository-wide secrets because each environment has distinct values.
 
 | Secret name                         | Where to get it                                                | Notes |
 | ----------------------------------- | -------------------------------------------------------------- | ----- |

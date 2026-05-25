@@ -71,7 +71,7 @@ apps:
   # ── PostgreSQL ─────────────────────────────────────────────────────────
   postgres:
     name: healthsync-postgres
-    image: ghcr.io/mpairwe7/healthsync-uganda-postgres
+    image: docker.io/mpairwe7/healthsync-uganda-postgres
     image_tag: main                            # tracks main branch; pin to v* in production
     port: 5432
     replicas: 1                                # NO HA — Crane Cloud apps don't support clustering today
@@ -105,7 +105,7 @@ apps:
   # ── Backend ────────────────────────────────────────────────────────────
   backend:
     name: healthsync-backend
-    image: ghcr.io/mpairwe7/healthsync-uganda-backend
+    image: docker.io/mpairwe7/healthsync-uganda-backend
     # Image tag is environment-specific (set in environments/<env>.env as
     # BACKEND_IMAGE_TAG); the Makefile composes `${image}:${tag}` at deploy.
     port: 8000
@@ -151,7 +151,7 @@ apps:
   # ── Frontend ───────────────────────────────────────────────────────────
   frontend:
     name: healthsync-frontend
-    image: ghcr.io/mpairwe7/healthsync-uganda-frontend
+    image: docker.io/mpairwe7/healthsync-uganda-frontend
     port: 3000
     replicas: 2
     command: ""          # `next start` via Dockerfile CMD
@@ -165,10 +165,11 @@ apps:
 # ── Notes ────────────────────────────────────────────────────────────────
 #
 # 1. Images must be reachable from Crane Cloud's pull side. Default registry
-#    is ghcr.io; backend + frontend packages are already public. Redis is
-#    pulled from the official Docker Hub library image. To switch the
-#    backend / frontend to Crane Cloud's own registry, change `image:`
-#    above and update the build step in `.github/workflows/build-push.yml`.
+#    is docker.io (Docker Hub); Crane Cloud's RENU and AHUMAIN ML clusters
+#    cannot pull from ghcr.io as of 2026-05-26 — see infra/cranecloud/README.md
+#    §9.1 for the control-deploy evidence. Redis is the official Docker Hub
+#    library image; backend/frontend/postgres are published from this repo
+#    via .github/workflows/build-push.yml.
 #
 # 2. Secrets are passed via `cranecloud apps deploy -e KEY=value` flags. The
 #    values appear briefly on the command line — visible to `ps` on the host
