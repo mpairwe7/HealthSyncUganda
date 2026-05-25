@@ -108,3 +108,50 @@ async def seed_admin(db: Annotated[AsyncSession, Depends(get_db)]) -> dict[str, 
         db.add(user)
         return {"created": "admin"}
     return {"created": "noop"}
+
+
+@router.post("/seed-demo", include_in_schema=False)
+async def seed_demo() -> dict[str, str | int]:
+    """Demo helper — runs the FULL seed (facilities, users, supply items,
+    patients, encounters, consents) into the configured database.
+
+    Idempotent: re-runs upsert records keyed by NIN / code / username.
+
+    Guarded by app_env: refuses in production. For staging / pilot / dev,
+    this is the canonical way to populate a freshly-deployed Crane Cloud
+    Postgres app (which the platform creates empty + no documented
+    persistent volumes — see infra/cranecloud/README.md §0.1).
+
+    Counts are returned for downstream verification.
+    """
+    from app.config import get_settings
+    from app.db.session import dispose_engine, get_session_factory
+    from app.db.models.facility import Facility
+    from app.db.models.patient import Patient
+
+    settings = get_settings()
+    if settings.is_production:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "seed-demo disabled in APP_ENV=production",
+        )
+
+    # Import lazily so the seed module isn't loaded on every request — only
+    # when this endpoint is hit.
+    from app.seed.run import main as run_seed
+
+    logger.info("auth.seed_demo.start", env=settings.app_env)
+    await run_seed()
+    # run_seed disposes the engine; reopen and count what landed
+    factory = get_session_factory()
+    async with factory() as s:
+        facilities = (await s.scalars(select(Facility))).all()
+        users = (await s.scalars(select(User))).all()
+        patients = (await s.scalars(select(Patient))).all()
+    counts = {
+        "facilities": len(facilities),
+        "users":      len(users),
+        "patients":   len(patients),
+    }
+    logger.info("auth.seed_demo.done", **counts)
+    return {"seeded": "demo", **counts}
