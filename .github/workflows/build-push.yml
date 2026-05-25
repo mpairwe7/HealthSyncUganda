@@ -1,0 +1,145 @@
+name: Build & push images (GHCR)
+
+# Triggers
+#   • push to main         → tagged with branch + short-sha
+#   • push of v* tag       → tagged with version + latest (semver release)
+#   • workflow_dispatch    → manual rebuild from any ref
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why are you rebuilding? (audit trail)"
+        required: false
+        default: "manual rebuild"
+
+concurrency:
+  group: build-push-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write       # required to push to ghcr.io
+
+env:
+  REGISTRY: ghcr.io
+  # Org/repo prefix on GHCR. Inherited from the workflow file's repo by default.
+  IMAGE_OWNER: ${{ github.repository_owner }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: backend
+            context: backend
+            dockerfile: backend/Dockerfile
+            image_suffix: healthsync-uganda-backend
+          - app: frontend
+            context: frontend
+            dockerfile: frontend/Dockerfile
+            image_suffix: healthsync-uganda-frontend
+
+    name: ${{ matrix.app }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Derives tag list deterministically:
+      #   - branch name (e.g. main)
+      #   - short SHA (always)
+      #   - semver version (when ref is v*)
+      #   - latest (only on a non-pre-release v* tag)
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ matrix.image_suffix }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+          labels: |
+            org.opencontainers.image.title=HealthSync Uganda — ${{ matrix.app }}
+            org.opencontainers.image.description=Sovereign open-source national digital health platform (${{ matrix.app }}).
+            org.opencontainers.image.vendor=HealthSync Uganda
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build & push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false                       # keep the image SBOM simple for now; revisit at pre-pilot
+          cache-from: type=gha,scope=${{ matrix.app }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app }}
+
+      - name: Image summary
+        run: |
+          echo "### ${{ matrix.app }} image pushed" >> $GITHUB_STEP_SUMMARY
+          echo "- digest: \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- tags:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # Trigger Crane Cloud deploy automatically after a successful push of either
+  # branch-main or a v* tag. Pilot is the default target; production deploys
+  # are operator-triggered via workflow_dispatch on deploy-cranecloud.yml.
+  dispatch-deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute deploy environment
+        id: env
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "env=pilot"    >> $GITHUB_OUTPUT
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          else
+            echo "env=staging"  >> $GITHUB_OUTPUT
+            echo "tag=sha-$(git rev-parse --short HEAD || echo ${GITHUB_SHA::7})" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Trigger Crane Cloud rollout
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const env = '${{ steps.env.outputs.env }}';
+            const tag = '${{ steps.env.outputs.tag }}';
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'deploy-cranecloud.yml',
+              ref: context.ref,
+              inputs: {
+                env: env,
+                target: 'both',
+                image_tag: tag,
+              }
+            });
+            core.notice(`Dispatched deploy-cranecloud (env=${env}, tag=${tag})`);

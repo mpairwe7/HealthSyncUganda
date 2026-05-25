@@ -15,6 +15,12 @@ This file is the canonical, audit-facing history of user-visible changes. It is 
 
 ## [Unreleased]
 
+### Added (CI/CD)
+- `.github/workflows/build-push.yml` — multi-image GHCR build & push on `main` / `v*` tag / `workflow_dispatch`, with auto-dispatch to staging (on `main`) and pilot (on `v*`).
+- `.github/workflows/deploy-cranecloud.yml` — operator-led Crane Cloud rollout via the `cranecloud` CLI; keyring disabled with `PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring`; environment-scoped secrets; loud fallback to `make update-*` when the CLI cannot authenticate.
+- `.github/workflows/ci.yml` — new `docker-build` matrix job that verifies both Dockerfiles still build on every PR (no push).
+- `infra/cranecloud/README.md` §9 — full CI/CD documentation: triggers, secrets, environment-gated deploys, typical flow.
+
 ### Added
 - New audit-grade documentation set:
   - `docs/INCIDENT_RESPONSE.md` — breach playbook (DPPA s.19, NIST SP 800-61r2 phases, PDPO notification template).

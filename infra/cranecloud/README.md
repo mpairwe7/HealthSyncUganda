@@ -152,7 +152,56 @@ For `ENV=production` we observe the policies from [ADR 0000 governance](../../do
 
 ---
 
-## 9. Rollback
+## 9. CI/CD pipeline
+
+Two GitHub Actions workflows automate the parts of the rollout that are safe to automate:
+
+### 9.1 `.github/workflows/build-push.yml` — fully automated
+
+- **Triggers:** push to `main`, push of `v*` tags, manual `workflow_dispatch`.
+- **What it does:** builds `backend/` and `frontend/` images via `docker/build-push-action` and pushes to `ghcr.io/mpairwe7/healthsync-uganda-{backend,frontend}` with derived tags (`main`, `sha-<short>`, version, `latest` on non-prerelease releases).
+- **Auth:** `GITHUB_TOKEN` (no extra secret).
+- **After successful build on `main` / `v*`:** dispatches `deploy-cranecloud.yml` automatically — `main` → `staging`, `v*` → `pilot`. Production deploys are *never* automatic; they are operator-triggered via `workflow_dispatch`.
+
+### 9.2 `.github/workflows/deploy-cranecloud.yml` — operator-led
+
+- **Triggers:** `workflow_dispatch` only (manual); also invoked by `build-push.yml` for staging / pilot.
+- **Inputs:** `env` (staging/pilot/production), `target` (backend/frontend/both), `image_tag`.
+- **Auth path:** pip-installs `cranecloud`, sets `PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring` so the CLI does not require D-Bus / SecretService, and seeds `~/.cranecloud/token` from the environment secret `CRANECLOUD_TOKEN`.
+- **Environment protection:** uses GitHub Environments (`cranecloud-staging`, `cranecloud-pilot`, `cranecloud-production`) so production deploys can require manual reviewer approval per [ADR 0000](../../docs/adr/0000-governance.md).
+- **Fallback:** if the CLI cannot authenticate (e.g. a future cranecloud version re-introduces a keyring dependency that the null backend cannot satisfy), the job fails loudly and posts the manual-deploy command to the run summary so the operator can run the same rollout from their interactive shell via `make update-*`.
+
+### 9.3 Required GitHub secrets
+
+These are configured per environment (Settings → Environments → cranecloud-<env> → Environment secrets). They are *not* repository-wide secrets because each environment has distinct values.
+
+| Secret name                         | Where to get it                                                | Notes |
+| ----------------------------------- | -------------------------------------------------------------- | ----- |
+| `CRANECLOUD_TOKEN`                  | `cat ~/.cranecloud/token` after `cranecloud auth login`        | Treat as bearer credential. Rotate per [SECURITY.md](../../docs/SECURITY.md) cadence. |
+| `CRANECLOUD_USER_ID`                | `cat ~/.cranecloud/user_id`                                    | |
+| `CRANECLOUD_PROJECT_ID`             | `cranecloud projects list` (UUID column)                       | Per-environment value. |
+| `CRANECLOUD_BACKEND_APP_ID`         | After first `make deploy-backend ENV=<env>` — captured from CLI output | Per-environment value. |
+| `CRANECLOUD_FRONTEND_APP_ID`        | After first `make deploy-frontend ENV=<env>`                   | Per-environment value. |
+
+Runtime env vars for the apps (DATABASE_URL, SECRET_KEY, NIRA_*, DHIS2_*) live in **Crane Cloud's web-dashboard secret manager**, not in GitHub Actions secrets. The CI deploy only updates the *image*, not the env vars. This minimises the secret surface in GitHub.
+
+### 9.4 Typical flow
+
+```
+git tag v0.1.0-pre-pilot.3
+git push origin v0.1.0-pre-pilot.3
+   ↓ triggers build-push.yml
+   ↓ builds + pushes backend + frontend images to GHCR
+   ↓ dispatches deploy-cranecloud.yml (env=pilot, tag=v0.1.0-pre-pilot.3)
+   ↓ deploy-cranecloud.yml updates the existing Crane Cloud apps
+   ↓ /healthz + /readyz become green on the new image
+```
+
+Production deploys deliberately skip the dispatch — to roll out to production, an operator goes to the Actions tab → `Deploy to Crane Cloud` → `Run workflow` → `env=production` → `image_tag=v0.1.0-pre-pilot.3`. The environment's required-reviewers rule then enforces the two-person sign-off from ADR 0000.
+
+---
+
+## 10. Rollback
 
 Crane Cloud retains image history per app. To roll back:
 
@@ -169,7 +218,7 @@ If the rollback target is older than the most recent migration, restore the data
 
 ---
 
-## 10. Common errors
+## 11. Common errors
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
@@ -182,10 +231,12 @@ If the rollback target is older than the most recent migration, restore the data
 
 ---
 
-## 11. Cross-references
+## 12. Cross-references
 
 - [`manifest.yaml`](./manifest.yaml) — the source of truth for what gets deployed.
 - [`Makefile`](./Makefile) — `make help` from this directory lists all targets.
+- [`../../.github/workflows/build-push.yml`](../../.github/workflows/build-push.yml) — GHCR build + push automation.
+- [`../../.github/workflows/deploy-cranecloud.yml`](../../.github/workflows/deploy-cranecloud.yml) — CI-driven deploy to Crane Cloud.
 - [`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md) — broader deployment topology (Compose, Kubernetes, Crane Cloud).
 - [`docs/SECURITY.md`](../../docs/SECURITY.md) — key-rotation cadence, secret-management policy.
 - [`docs/ROADMAP.md`](../../docs/ROADMAP.md) — deployment-shape progression: pilot → regional → national.
