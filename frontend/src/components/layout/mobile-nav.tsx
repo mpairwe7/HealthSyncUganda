@@ -81,12 +81,12 @@ export function MobileNav({ items }: Props) {
         {open ? <X className="h-5 w-5" aria-hidden /> : <Menu className="h-5 w-5" aria-hidden />}
       </Button>
 
-      {/* Backdrop — clicking it closes the sheet */}
+      {/* Backdrop — clicking it dismisses the sheet. aria-hidden so it
+          doesn't show up in the accessibility tree alongside the X button
+          (the explicit "Close menu" toggle is the canonical close affordance). */}
       {open && (
-        <button
-          type="button"
-          aria-label="Close menu"
-          tabIndex={-1}
+        <div
+          aria-hidden
           className="fixed inset-0 top-14 z-30 bg-black/40 sm:hidden"
           onClick={() => setOpen(false)}
         />
