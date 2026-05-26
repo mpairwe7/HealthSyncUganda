@@ -42,6 +42,9 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   themeColor: "#0F5132",
+  // viewport-fit=cover lets us paint under the iOS notch / Android cutout
+  // and use env(safe-area-inset-*) to keep content out of the unsafe areas.
+  viewportFit: "cover",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -60,7 +63,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         </a>
         <Providers>
           <Header />
-          <main id="main-content" className="container py-6">
+          <main id="main-content" className="container py-4 sm:py-6">
             {children}
           </main>
         </Providers>

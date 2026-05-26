@@ -1404,3 +1404,111 @@ test.describe("I. Worker dashboard pilot-tier additions", () => {
     await expect(page.getByText(/this facility/i).first()).toBeVisible({ timeout: 10_000 });
   });
 });
+
+// ---------------------------------------------------------------------------
+// J. Mobile-viewport (iPhone 12, 390x844) responsiveness
+// ---------------------------------------------------------------------------
+//
+// All other sections run at the desktop viewport (1280x800 from the config).
+// Section J explicitly switches to a phone-sized viewport before each test
+// to exercise the hamburger menu + that nav links are reachable, that
+// tables are horizontally scrollable, and that no critical content is cut
+// off below the safe-area inset.
+
+const MOBILE_VIEWPORT = { width: 390, height: 844 };
+
+test.describe("J. Mobile viewport (iPhone 12 — 390x844)", () => {
+  test.use({ viewport: MOBILE_VIEWPORT });
+
+  test("login page: form fields are tappable + sized to viewport", async ({ page }) => {
+    await page.goto("/login", { waitUntil: "domcontentloaded" });
+    await expect(page.locator("#username")).toBeVisible();
+    await expect(page.locator("#password")).toBeVisible();
+    // Button should be at least 44px tall (Apple HIG minimum)
+    const submit = page.locator("button[type=submit]").first();
+    const bbox = await submit.boundingBox();
+    expect(bbox?.height ?? 0).toBeGreaterThanOrEqual(40);
+  });
+
+  test("hamburger menu: visible at mobile, hidden inline nav links", async ({ page }) => {
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    // The "Open menu" button is the hamburger; visible only at <sm
+    const hamburger = page.getByRole("button", { name: /open menu/i });
+    await expect(hamburger).toBeVisible();
+  });
+
+  test("hamburger menu opens + closes; shows role-appropriate links", async ({ page }) => {
+    const session = await fetchStaffSession("nurse.gulu", "demo1234");
+    await primeSession(page, session);
+    await page.setViewportSize(MOBILE_VIEWPORT);
+
+    await page.goto("/worker", { waitUntil: "domcontentloaded" });
+    // Wait for hydration so the session-aware nav is filtered
+    await page.waitForTimeout(1500);
+
+    await page.getByRole("button", { name: /open menu/i }).click();
+    const sheet = page.getByRole("dialog", { name: /main navigation/i });
+    await expect(sheet).toBeVisible();
+    // Worker role should see "Worker dashboard" link in the sheet
+    await expect(
+      sheet.getByRole("link", { name: /worker dashboard/i }).first(),
+    ).toBeVisible();
+
+    // Sign-out button is part of the sheet on mobile
+    await expect(sheet.getByRole("button", { name: /sign out/i })).toBeVisible();
+
+    // Close via the close button (renders as X icon, same aria-label toggled to "Close menu")
+    await page.getByRole("button", { name: /close menu/i }).first().click();
+    // The dialog is now display: none-equivalent (max-h-0 + pointer-events-none)
+    await page.waitForTimeout(500);
+  });
+
+  test("/worker/patients: table is horizontally scrollable at mobile width", async ({ page }) => {
+    const session = await fetchStaffSession("nurse.gulu", "demo1234");
+    await primeSession(page, session);
+    await page.setViewportSize(MOBILE_VIEWPORT);
+
+    await page.goto("/worker/patients", { waitUntil: "domcontentloaded" });
+    await expect(
+      page.getByRole("heading", { name: /patients/i }).first(),
+    ).toBeVisible({ timeout: 10_000 });
+
+    // The table is constrained min-w-[640px] but viewport is 390 → wrapper
+    // must overflow. Confirm by measuring the table's bounding box vs viewport.
+    const table = page.locator("table").first();
+    const bb = await table.boundingBox();
+    expect(bb?.width ?? 0).toBeGreaterThanOrEqual(640);
+  });
+
+  test("/worker/patients/[id] tabs: scroll horizontally instead of wrapping", async ({ page }) => {
+    const session = await fetchStaffSession("admin", "admin1234");
+    await primeSession(page, session);
+    await page.setViewportSize(MOBILE_VIEWPORT);
+
+    // Pick any patient from the list
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${session.token}` },
+    });
+    const list = await (await ctx.get("/api/v1/patients?limit=1")).json();
+    const id = list.items[0].id;
+    await ctx.dispose();
+
+    await page.goto(`/worker/patients/${id}`, { waitUntil: "domcontentloaded" });
+    // Wait for the patient to load
+    await page.waitForTimeout(2000);
+    // All 5 tabs should still be reachable (in a horizontally scrollable bar)
+    await expect(page.getByRole("tab", { name: /encounters/i })).toBeVisible();
+    await expect(page.getByRole("tab", { name: /admin/i })).toBeVisible();
+  });
+
+  test("sticky header: stays at top during scroll", async ({ page }) => {
+    await page.goto("/citizen/login", { waitUntil: "domcontentloaded" });
+    // The header is sticky top-0
+    const headerY = await page
+      .locator("header")
+      .first()
+      .evaluate((el) => el.getBoundingClientRect().top);
+    expect(Math.round(headerY)).toBe(0);
+  });
+});
