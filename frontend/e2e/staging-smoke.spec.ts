@@ -1333,7 +1333,7 @@ test.describe("I. Worker dashboard pilot-tier additions", () => {
     await citCtx.dispose();
   });
 
-  test("browser walk: /worker/immunisations renders facility-stock + patient-lookup", async ({ page }) => {
+  test("browser walk: /worker/immunisations renders the 3-step layout", async ({ page }) => {
     const session = await fetchStaffSession("nurse.gulu", "demo1234");
     await primeSession(page, session);
 
@@ -1341,8 +1341,12 @@ test.describe("I. Worker dashboard pilot-tier additions", () => {
     await expect(
       page.getByRole("heading", { name: /immunisations/i }).first(),
     ).toBeVisible({ timeout: 10_000 });
+    // Step-1 patient search is always visible.
     await expect(page.locator("#nin-search")).toBeVisible();
-    await expect(page.locator("#vaccine")).toBeVisible();
+    // Step-3 vaccine picker only appears after a patient is picked — verify by
+    // headings that the workflow scaffolding is there.
+    await expect(page.getByText(/step 1.*find the patient/i)).toBeVisible();
+    await expect(page.getByText(/vaccine stock at your facility/i)).toBeVisible();
   });
 
   test("browser walk: /worker/supply/receive renders all batch fields", async ({ page }) => {
