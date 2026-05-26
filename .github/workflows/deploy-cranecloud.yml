@@ -99,25 +99,41 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install cranecloud CLI + keyrings.alt
+      - name: Install cranecloud CLI + keyrings.alt + keyring CLI
         run: |
           set -euo pipefail
           pip install --upgrade pip
           pip install cranecloud || pip install crane-cloud-cli
           # The null keyring backend silently drops writes; the file backend
-          # is in keyrings.alt and is the only one that works in non-tty CI.
-          pip install 'keyrings.alt'
-          which cranecloud
+          # in keyrings.alt is the only one that works in non-tty CI.
+          # `keyring` (the CLI) is needed to seed entries non-interactively.
+          pip install 'keyrings.alt' 'keyring'
+          which cranecloud keyring
           cranecloud --help | head -5
 
-      - name: Seed cranecloud token from secret
+      - name: Seed cranecloud session into the keyring backend
         run: |
           set -euo pipefail
+          # The cranecloud CLI reads its token via:
+          #   keyring.get_password('cranecloud', 'token')
+          # so writing ~/.cranecloud/token alone does nothing — the file is
+          # ignored by the CLI's get_token() helper (confirmed by reading
+          # cranecloud/utils/__init__.py on 2026-05-26). We have to put the
+          # secret INTO the file-backed keyring at the canonical path:
+          #   $XDG_DATA_HOME/python_keyring/keyring_pass.cfg
+          # Doing it via the keyring CLI on stdin avoids leaking the secret
+          # into argv / shell history.
+          mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/python_keyring"
+          printf '%s' "${CRANECLOUD_TOKEN}"   | keyring set cranecloud token
+          printf '%s' "${CRANECLOUD_USER_ID}" | keyring set cranecloud user_id
+
+          # The CLI also reads ~/.cranecloud/user_id directly for some
+          # subcommands (`projects use-project` etc) — write that too as a
+          # belt-and-braces fallback.
           mkdir -p ~/.cranecloud
           umask 077
-          printf '%s' "${CRANECLOUD_TOKEN}"   > ~/.cranecloud/token
           printf '%s' "${CRANECLOUD_USER_ID}" > ~/.cranecloud/user_id
-          chmod 600 ~/.cranecloud/token ~/.cranecloud/user_id
+          chmod 600 ~/.cranecloud/user_id
         env:
           CRANECLOUD_TOKEN:   ${{ secrets.CRANECLOUD_TOKEN }}
           CRANECLOUD_USER_ID: ${{ secrets.CRANECLOUD_USER_ID }}
@@ -126,11 +142,26 @@ jobs:
         id: verify
         run: |
           set -euo pipefail
+          # Sanity-check the keyring entry without printing its value.
+          if ! keyring get cranecloud token >/dev/null 2>&1; then
+            echo "::error::keyring read failed — the seed step did not stash 'cranecloud:token'."
+            echo "### ❌ Keyring seed failed (Crane Cloud token not retrievable)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           if ! cranecloud auth user >/tmp/auth.log 2>&1; then
             {
               echo "### ❌ Crane Cloud auth failed"
               echo
-              echo "The CLI couldn't read the seeded token even with the file keyring backend."
+              echo "Token is in the keyring, but the API rejected it. Most likely cause:"
+              echo "the secret has expired or been rotated. Refresh CRANECLOUD_TOKEN in"
+              echo "the cranecloud-${{ inputs.env }} environment (Settings → Environments)."
+              echo
+              echo "CLI output:"
+              echo '```'
+              # Redact anything that looks like a bearer token in the log
+              sed -E 's/(token|bearer)=[^ ]+/\1=REDACTED/Ig' /tmp/auth.log
+              echo '```'
+              echo
               echo "Fallback: deploy from an interactive shell."
               echo
               echo '```bash'
@@ -138,12 +169,13 @@ jobs:
               echo "make update-${{ inputs.target }} ENV=${{ inputs.env }}"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            cat /tmp/auth.log
+            sed -E 's/(token|bearer)=[^ ]+/\1=REDACTED/Ig' /tmp/auth.log
             exit 1
           fi
           # Extract the user's name into a step output (no secrets leaked)
           name=$(grep -E "^Name" /tmp/auth.log | awk -F '  +' '{print $2}')
           echo "actor=$name" >> "$GITHUB_OUTPUT"
+          echo "### ✅ Authenticated as $name" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Capture current image tags (for rollback)
         id: previous
@@ -367,5 +399,12 @@ jobs:
       - name: Cleanup token
         if: always()
         run: |
+          # Clear both the legacy on-disk paths AND the keyring backend that
+          # the CLI actually reads from. `keyring del` returns non-zero if
+          # the entry doesn't exist — that's fine on a clean run.
+          keyring del cranecloud token 2>/dev/null || true
+          keyring del cranecloud user_id 2>/dev/null || true
+          KR="${XDG_DATA_HOME:-$HOME/.local/share}/python_keyring/keyring_pass.cfg"
+          shred -uz "$KR" 2>/dev/null || rm -f "$KR"
           shred -uz ~/.cranecloud/token   2>/dev/null || rm -f ~/.cranecloud/token
           shred -uz ~/.cranecloud/user_id 2>/dev/null || rm -f ~/.cranecloud/user_id
