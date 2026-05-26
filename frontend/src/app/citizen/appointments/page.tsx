@@ -4,16 +4,17 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 
 import { ScopeNote } from "@/components/ui/scope-note";
-import { useAuth } from "@/lib/store/auth";
+import { useAuth, useAuthHydrated } from "@/lib/store/auth";
 
 export default function CitizenAppointmentsPage() {
   const session = useAuth((s) => s.session);
+  const hydrated = useAuthHydrated();
   const router = useRouter();
   useEffect(() => {
-    if (!session) router.replace("/citizen/login");
-  }, [session, router]);
+    if (hydrated && !session) router.replace("/citizen/login");
+  }, [hydrated, session, router]);
 
-  if (!session) return null;
+  if (!hydrated || !session) return null;
 
   return (
     <ScopeNote

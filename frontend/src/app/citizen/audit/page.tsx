@@ -24,7 +24,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useFacilities, useMyAudit } from "@/lib/api/hooks";
-import { useAuth } from "@/lib/store/auth";
+import { useAuth, useAuthHydrated } from "@/lib/store/auth";
 import { useUi } from "@/lib/store/ui";
 
 type Window = 7 | 30 | 90;
@@ -44,19 +44,20 @@ const friendlyAction: Record<string, string> = {
 
 export default function CitizenAuditPage() {
   const session = useAuth((s) => s.session);
+  const hydrated = useAuthHydrated();
   const router = useRouter();
   const online = useUi((s) => s.online);
   const [window, setWindow] = useState<Window>(30);
 
   useEffect(() => {
-    if (!session) router.replace("/citizen/login");
-  }, [session, router]);
+    if (hydrated && !session) router.replace("/citizen/login");
+  }, [hydrated, session, router]);
 
   const audit = useMyAudit(window, !!session);
   const facilities = useFacilities();
   const facilityById = new Map((facilities.data ?? []).map((f) => [f.id, f]));
 
-  if (!session) return null;
+  if (!hydrated || !session) return null;
 
   return (
     <div className="space-y-6">

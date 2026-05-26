@@ -25,7 +25,7 @@ import {
 } from "@/components/ui/table";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useGrantOwnConsent, useMe } from "@/lib/api/hooks";
-import { useAuth } from "@/lib/store/auth";
+import { useAuth, useAuthHydrated } from "@/lib/store/auth";
 import { useUi } from "@/lib/store/ui";
 
 import type { ConsentOut, ConsentScope } from "@/types/api";
@@ -39,6 +39,7 @@ const SCOPE_LABELS: Record<ConsentScope, string> = {
 
 export default function ConsentPage() {
   const session = useAuth((s) => s.session);
+  const hydrated = useAuthHydrated();
   const router = useRouter();
   const pushToast = useUi((s) => s.pushToast);
   const online = useUi((s) => s.online);
@@ -48,8 +49,8 @@ export default function ConsentPage() {
   const [newPurpose, setNewPurpose] = useState("Emergency care");
 
   useEffect(() => {
-    if (!session) router.replace("/citizen/login");
-  }, [session, router]);
+    if (hydrated && !session) router.replace("/citizen/login");
+  }, [hydrated, session, router]);
 
   const me = useMe(!!session);
   const patientId = me.data?.id;
@@ -81,7 +82,7 @@ export default function ConsentPage() {
     );
   }
 
-  if (!session) return null;
+  if (!hydrated || !session) return null;
 
   return (
     <div className="space-y-6">

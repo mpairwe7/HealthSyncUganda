@@ -22,18 +22,19 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useFacilities } from "@/lib/api/hooks";
-import { useAuth } from "@/lib/store/auth";
+import { useAuth, useAuthHydrated } from "@/lib/store/auth";
 import { useUi } from "@/lib/store/ui";
 
 export default function CitizenFacilitiesPage() {
   const session = useAuth((s) => s.session);
+  const hydrated = useAuthHydrated();
   const router = useRouter();
   const online = useUi((s) => s.online);
   const [district, setDistrict] = useState<string>("");
 
   useEffect(() => {
-    if (!session) router.replace("/citizen/login");
-  }, [session, router]);
+    if (hydrated && !session) router.replace("/citizen/login");
+  }, [hydrated, session, router]);
 
   const facilities = useFacilities();
   const allFacilities = facilities.data ?? [];
@@ -50,7 +51,7 @@ export default function CitizenFacilitiesPage() {
     [allFacilities, district],
   );
 
-  if (!session) return null;
+  if (!hydrated || !session) return null;
 
   return (
     <div className="space-y-6">

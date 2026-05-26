@@ -738,7 +738,23 @@ async function checkRoute(
   page.on("response", onResponse);
   page.on("console", onConsole);
 
-  const resp = await page.goto(path, { waitUntil: "domcontentloaded" });
+  // Crane Cloud's ingress occasionally drops a navigation with
+  // ERR_NETWORK_CHANGED — retry once with a brief pause to absorb that
+  // transient before failing the test.
+  let resp: Awaited<ReturnType<typeof page.goto>> | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      resp = await page.goto(path, { waitUntil: "domcontentloaded" });
+      break;
+    } catch (err) {
+      const msg = String(err);
+      if (attempt === 0 && msg.includes("ERR_NETWORK_CHANGED")) {
+        await page.waitForTimeout(1000);
+        continue;
+      }
+      throw err;
+    }
+  }
   expect(resp?.status(), `GET ${path} status`).toBe(200);
 
   // Heading appears once the page client component renders post-redirect.
@@ -1040,14 +1056,24 @@ test.describe("H. /api/v1/me/* self-serve + safety", () => {
     const session = await fetchCitizenSession("CF24091344332R", "000000");
     await primeSession(page, session);
 
-    await page.goto("/citizen/immunisations", { waitUntil: "domcontentloaded" });
+    // Wait for the /me/immunisations API call to complete so the loading
+    // skeleton flips to the real table before we assert on column headers.
+    const [immResp] = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().includes("/api/v1/me/immunisations") && r.status() === 200,
+        { timeout: 15_000 },
+      ),
+      page.goto("/citizen/immunisations", { waitUntil: "domcontentloaded" }),
+    ]);
+    expect(immResp.status()).toBe(200);
+
     await expect(
       page.getByRole("heading", { name: /immunisations/i }).first(),
     ).toBeVisible({ timeout: 10_000 });
-    // Allow time for the API call to populate the table
-    await page.waitForTimeout(2000);
-    // The vaccine column header should be present
-    await expect(page.locator("text=Vaccine").first()).toBeVisible();
+    // The table header should now be rendered (Date, Vaccine, Facility, Code)
+    await expect(
+      page.getByRole("columnheader", { name: /vaccine/i }).first(),
+    ).toBeVisible({ timeout: 5_000 });
   });
 
   test("browser walk: /citizen/audit renders at least one access log row", async ({ page }) => {

@@ -4,6 +4,7 @@
  * (defensive default for a health-data app).
  */
 
+import { useEffect, useState } from "react";
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 
@@ -54,3 +55,25 @@ export const useAuth = create<State>()(
     },
   ),
 );
+
+/**
+ * Returns `true` once Zustand's persist middleware has finished reading
+ * sessionStorage. Before this returns true, `session` may be transiently
+ * `null` even when the user has a valid stored session — gate any
+ * "not logged in → redirect to /login" effect on this so the page does
+ * not flash to the login screen on reload.
+ */
+export function useAuthHydrated(): boolean {
+  const [hydrated, setHydrated] = useState<boolean>(
+    () => useAuth.persist.hasHydrated(),
+  );
+  useEffect(() => {
+    if (useAuth.persist.hasHydrated()) {
+      setHydrated(true);
+      return;
+    }
+    const unsub = useAuth.persist.onFinishHydration(() => setHydrated(true));
+    return unsub;
+  }, []);
+  return hydrated;
+}
