@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import configure_logging, get_logger
 from app.core.security import hash_password
 from app.db.base import Base
+from app.db.models.caregiver import CaregiverLink
 from app.db.models.consent import Consent
 from app.db.models.encounter import Encounter, Observation
 from app.db.models.facility import Facility
@@ -429,6 +430,53 @@ async def _seed_transfers(
         seeded += 1
 
 
+async def _seed_caregivers(s: AsyncSession) -> None:
+    """Seed caregiver→child links for the demo family graphs.
+
+    Picks two adult ANC-age women already in the seed and pairs them with
+    two paediatric patients. The pairs are chosen for the showcase
+    narrative: a mother in Wakiso has two young children registered
+    across nearby districts, illustrating the cross-facility family
+    coordination story.
+
+    Idempotent: skip pairs that are already linked.
+    """
+    pairs = [
+        # (caregiver_nin, child_nin, relationship)
+        ("CF93081244778K", "CM23071955443Q", "mother"),  # Wakiso mother → Wakiso toddler
+        ("CF93081244778K", "CF24091344332R", "mother"),  # same mother → infant in Gulu
+        ("CF96112266889L", "CF22050466554P", "mother"),  # Gulu mother → Jinja toddler
+        ("CF94060533445M", "CM21030877665N", "guardian"),  # Lira aunt → Kampala child
+    ]
+
+    for caregiver_nin, child_nin, relationship in pairs:
+        caregiver = (
+            await s.scalars(select(Patient).where(Patient.nin == caregiver_nin))
+        ).one_or_none()
+        child = (
+            await s.scalars(select(Patient).where(Patient.nin == child_nin))
+        ).one_or_none()
+        if caregiver is None or child is None:
+            continue
+        existing = (
+            await s.scalars(
+                select(CaregiverLink).where(
+                    CaregiverLink.caregiver_id == caregiver.id,
+                    CaregiverLink.child_id == child.id,
+                )
+            )
+        ).one_or_none()
+        if existing is not None:
+            continue
+        s.add(
+            CaregiverLink(
+                caregiver_id=caregiver.id,
+                child_id=child.id,
+                relationship=relationship,
+            )
+        )
+
+
 async def _seed_self_audit_reads(
     s: AsyncSession,
     patient_ids: dict[str, str],
@@ -509,6 +557,7 @@ async def main() -> None:
             await _seed_consents(s, patients, admin.id)
             await _seed_self_audit_reads(s, patients, facility_ids)
             await _seed_transfers(s, facility_ids, items, admin.id)
+            await _seed_caregivers(s)
     logger.info(
         "seed.done",
         facilities=len(facility_ids),

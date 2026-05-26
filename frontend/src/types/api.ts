@@ -293,3 +293,60 @@ export type DispenseResult = {
   dispensed_quantity: number;
   events_recorded: number;
 };
+
+// ── Immunisation schedule + family ───────────────────────────────────────────
+
+export type ImmunisationStatusLevel =
+  | "complete"
+  | "due"
+  | "due-soon"
+  | "overdue"
+  | "not-yet";
+
+export type AntigenStatusOut = {
+  antigen: string;            // short label "BCG", "DPT", …
+  display: string;            // human readable
+  snomed_code: string;
+  series_size: number;
+  doses_given: number;
+  next_dose_number: number | null;
+  next_due_date: string | null;    // ISO date
+  overdue_days: number;
+  last_dose_at: string | null;
+  status: ImmunisationStatusLevel;
+};
+
+export type CaregiverRelationship =
+  | "mother"
+  | "father"
+  | "guardian"
+  | "grandparent"
+  | "sibling"
+  | "aunt"
+  | "uncle"
+  | "other";
+
+export type FamilyMemberOut = {
+  link_id: string;
+  patient_id: string;
+  nin: string;
+  given_name: string;
+  family_name: string;
+  birth_date: string;
+  gender: Gender;
+  relationship: string;
+  overdue_antigen_count: number;
+};
+
+export type CaregiverLinkIn = {
+  caregiver_nin: string;
+  relationship: CaregiverRelationship;
+};
+
+export type CaregiverLinkOut = {
+  id: string;
+  caregiver_id: string;
+  child_id: string;
+  relationship: string;
+  created_at: string;
+};

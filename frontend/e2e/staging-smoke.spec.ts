@@ -1512,3 +1512,230 @@ test.describe("J. Mobile viewport (iPhone 12 — 390x844)", () => {
     expect(Math.round(headerY)).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// K. Immunisation schedule + family graph (pilot-tier)
+// ---------------------------------------------------------------------------
+//
+// Covers the UNEPI-aware /patients/{id}/immunisation-status endpoint,
+// caregiver link/unlink, /me/family for citizens, and the caregiver-aware
+// permission expansion that lets a mother read her child's record.
+
+test.describe("K. Immunisation schedule + family", () => {
+  test("GET /patients/{id}/immunisation-status returns per-antigen status with next_due_date", async () => {
+    const token = await loginStaff("admin", "admin1234");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    // Use the paediatric seeded patient (has vaccines in history)
+    const lookup = await (await ctx.get("/api/v1/patients?q=CF24091344332R&limit=1")).json();
+    expect(lookup.items.length).toBe(1);
+    const patientId = lookup.items[0].id;
+
+    const resp = await ctx.get(`/api/v1/patients/${patientId}/immunisation-status`);
+    expect(resp.status()).toBe(200);
+    const body = await resp.json();
+    expect(Array.isArray(body)).toBeTruthy();
+    expect(body.length).toBe(6); // BCG, OPV, DPT, PCV, MR, YF
+    for (const row of body) {
+      expect(["complete", "due", "due-soon", "overdue", "not-yet"]).toContain(row.status);
+      expect(typeof row.doses_given).toBe("number");
+      expect(typeof row.series_size).toBe("number");
+    }
+    await ctx.dispose();
+  });
+
+  test("GET /patients/{id}/family returns linked caregivers + children (seeded)", async () => {
+    const token = await loginStaff("admin", "admin1234");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    // The Wakiso mother (CF93081244778K) is linked to two children in seed
+    const lookup = await (await ctx.get("/api/v1/patients?q=CF93081244778K&limit=1")).json();
+    const motherId = lookup.items[0].id;
+    const resp = await ctx.get(`/api/v1/patients/${motherId}/family`);
+    expect(resp.status()).toBe(200);
+    const family = await resp.json();
+    expect(family.length).toBeGreaterThanOrEqual(2);
+    for (const m of family) {
+      expect(m.patient_id).toBeTruthy();
+      expect(typeof m.overdue_antigen_count).toBe("number");
+    }
+    await ctx.dispose();
+  });
+
+  test("GET /me/family lets a caregiver-citizen list their own children", async () => {
+    // Wakiso mother logs in as a citizen
+    const token = await loginCitizen("CF93081244778K", "000000");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.get("/api/v1/me/family");
+    expect(resp.status()).toBe(200);
+    const family = await resp.json();
+    expect(family.length).toBeGreaterThanOrEqual(2);
+    // Each child carries an overdue_antigen_count
+    for (const child of family) {
+      expect("overdue_antigen_count" in child).toBeTruthy();
+    }
+    await ctx.dispose();
+  });
+
+  test("caregiver can READ their child's full record via /patients/{child_id}", async () => {
+    // The Wakiso mother is linked to CF24091344332R (infant in Gulu)
+    const token = await loginCitizen("CF93081244778K", "000000");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const family = await (await ctx.get("/api/v1/me/family")).json();
+    const child = family.find((c: { nin: string }) => c.nin === "CF24091344332R");
+    expect(child).toBeTruthy();
+
+    // Now read the child's full record — this would have been a 403 before
+    // we added the caregiver-aware permission helper.
+    const childResp = await ctx.get(`/api/v1/patients/${child.patient_id}`);
+    expect(childResp.status()).toBe(200);
+    expect((await childResp.json()).nin).toBe("CF24091344332R");
+    await ctx.dispose();
+  });
+
+  test("non-caregiver citizen CANNOT read another citizen's child → 403", async () => {
+    // Achieng (CM85051712345X) is NOT a caregiver for the Wakiso mother's children
+    const token = await loginCitizen("CM85051712345X", "000000");
+    const adminToken = await loginStaff("admin", "admin1234");
+    const adminCtx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${adminToken}` },
+    });
+    const child = (await (await adminCtx.get("/api/v1/patients?q=CF24091344332R&limit=1")).json()).items[0];
+    await adminCtx.dispose();
+
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.get(`/api/v1/patients/${child.id}`);
+    expect(resp.status()).toBe(403);
+    await ctx.dispose();
+  });
+
+  test("POST /patients/{id}/caregivers idempotently links + can update relationship", async () => {
+    const token = await loginStaff("nurse.gulu", "demo1234");
+    const adminToken = await loginStaff("admin", "admin1234");
+    const adminCtx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${adminToken}` },
+    });
+    // Pick a child + a separate adult that aren't already linked
+    const child = (await (await adminCtx.get("/api/v1/patients?q=CM21030877665N&limit=1")).json()).items[0];
+    const caregiver = (await (await adminCtx.get("/api/v1/patients?q=CM78100766775Y&limit=1")).json()).items[0];
+    await adminCtx.dispose();
+
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    // First link as "guardian"
+    const r1 = await ctx.post(`/api/v1/patients/${child.id}/caregivers`, {
+      data: { caregiver_nin: caregiver.nin, relationship: "guardian" },
+    });
+    expect(r1.status()).toBe(201);
+    const linkId = (await r1.json()).id;
+
+    // Re-link with a different relationship — should update, not duplicate
+    const r2 = await ctx.post(`/api/v1/patients/${child.id}/caregivers`, {
+      data: { caregiver_nin: caregiver.nin, relationship: "uncle" },
+    });
+    expect(r2.status()).toBe(201);
+    const second = await r2.json();
+    expect(second.id).toBe(linkId); // same row, updated label
+    expect(second.relationship).toBe("uncle");
+
+    // Cleanup: unlink so the test is idempotent across re-runs
+    expect((await ctx.delete(`/api/v1/patients/${child.id}/caregivers/${linkId}`)).status()).toBe(204);
+    await ctx.dispose();
+  });
+
+  test("POST /patients/{id}/caregivers refuses self-link → 422", async () => {
+    const token = await loginStaff("nurse.gulu", "demo1234");
+    const adminToken = await loginStaff("admin", "admin1234");
+    const adminCtx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${adminToken}` },
+    });
+    const target = (await (await adminCtx.get("/api/v1/patients?q=CM85051712345X&limit=1")).json()).items[0];
+    await adminCtx.dispose();
+
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.post(`/api/v1/patients/${target.id}/caregivers`, {
+      data: { caregiver_nin: target.nin, relationship: "guardian" },
+    });
+    expect(resp.status()).toBe(422);
+    await ctx.dispose();
+  });
+
+  test("POST /patients/{id}/caregivers with unknown caregiver NIN → 404", async () => {
+    const token = await loginStaff("nurse.gulu", "demo1234");
+    const adminToken = await loginStaff("admin", "admin1234");
+    const adminCtx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${adminToken}` },
+    });
+    const child = (await (await adminCtx.get("/api/v1/patients?q=CM21030877665N&limit=1")).json()).items[0];
+    await adminCtx.dispose();
+
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.post(`/api/v1/patients/${child.id}/caregivers`, {
+      data: { caregiver_nin: "CM99999999999Z", relationship: "guardian" },
+    });
+    expect(resp.status()).toBe(404);
+    await ctx.dispose();
+  });
+
+  test("safety: citizen JWT cannot POST a caregiver link → 403", async () => {
+    const token = await loginCitizen("CM85051712345X", "000000");
+    const adminToken = await loginStaff("admin", "admin1234");
+    const adminCtx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${adminToken}` },
+    });
+    const child = (await (await adminCtx.get("/api/v1/patients?q=CM21030877665N&limit=1")).json()).items[0];
+    await adminCtx.dispose();
+
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.post(`/api/v1/patients/${child.id}/caregivers`, {
+      data: { caregiver_nin: "CM85051712345X", relationship: "guardian" },
+    });
+    expect(resp.status()).toBe(403);
+    await ctx.dispose();
+  });
+
+  test("browser walk: /citizen/family renders the family card for the Wakiso mother", async ({ page }) => {
+    const session = await fetchCitizenSession("CF93081244778K", "000000");
+    await primeSession(page, session);
+
+    await page.goto("/citizen/family", { waitUntil: "domcontentloaded" });
+    await expect(
+      page.getByRole("heading", { name: /my family/i }).first(),
+    ).toBeVisible({ timeout: 10_000 });
+    // Card titles are the children's names. We seeded two children: Kintu Ssempa
+    // and Apio Lakot — at least one should be visible.
+    await page.waitForTimeout(2000);
+    const hasChild =
+      (await page.getByText(/kintu|apio|wasswa|babirye/i).count()) > 0;
+    expect(hasChild).toBeTruthy();
+  });
+});

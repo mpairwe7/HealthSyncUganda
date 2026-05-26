@@ -20,7 +20,10 @@ import { enqueue } from "@/lib/offline/queue";
 import { useUi } from "@/lib/store/ui";
 
 import type {
+  AntigenStatusOut,
   AuditEntryOut,
+  CaregiverLinkIn,
+  CaregiverLinkOut,
   ConsentOut,
   DispenseQuery,
   DispenseResult,
@@ -30,6 +33,7 @@ import type {
   FacilityEncounterCount,
   FacilityOut,
   FacilityStockSnapshot,
+  FamilyMemberOut,
   ImmunisationCoverage,
   ImmunisationOut,
   MarkDeceasedBody,
@@ -424,5 +428,67 @@ export function useStockTransfers(
     queryFn: () =>
       apiRequest<StockTransferOut[]>("/api/v1/supply/transfers", { query: filters }),
     enabled,
+  });
+}
+
+// ── Immunisation status + family graph ──────────────────────────────────────
+
+export function useImmunisationStatus(patientId: string | undefined) {
+  return useQuery({
+    queryKey: ["immunisation-status", patientId],
+    queryFn: () =>
+      apiRequest<AntigenStatusOut[]>(`/api/v1/patients/${patientId}/immunisation-status`),
+    enabled: !!patientId,
+  });
+}
+
+export function useFamily(patientId: string | undefined) {
+  return useQuery({
+    queryKey: ["family", patientId],
+    queryFn: () =>
+      apiRequest<FamilyMemberOut[]>(`/api/v1/patients/${patientId}/family`),
+    enabled: !!patientId,
+  });
+}
+
+export function useMyFamily(enabled = true) {
+  return useQuery({
+    queryKey: ["me", "family"],
+    queryFn: () => apiRequest<FamilyMemberOut[]>("/api/v1/me/family"),
+    enabled,
+  });
+}
+
+export function useLinkCaregiver(childPatientId: string | undefined) {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (body: CaregiverLinkIn) =>
+      apiRequest<CaregiverLinkOut>(
+        `/api/v1/patients/${childPatientId}/caregivers`,
+        { method: "POST", body },
+      ),
+    onSuccess: () => {
+      pushToast({ kind: "success", title: "Caregiver linked" });
+      qc.invalidateQueries({ queryKey: ["family", childPatientId] });
+      qc.invalidateQueries({ queryKey: ["me", "family"] });
+    },
+  });
+}
+
+export function useUnlinkCaregiver(childPatientId: string | undefined) {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (linkId: string) =>
+      apiRequest<void>(
+        `/api/v1/patients/${childPatientId}/caregivers/${linkId}`,
+        { method: "DELETE" },
+      ),
+    onSuccess: () => {
+      pushToast({ kind: "success", title: "Caregiver link removed" });
+      qc.invalidateQueries({ queryKey: ["family", childPatientId] });
+      qc.invalidateQueries({ queryKey: ["me", "family"] });
+    },
   });
 }

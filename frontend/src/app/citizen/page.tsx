@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 import {
+  Baby,
   CalendarClock,
   ClipboardList,
   FileLock2,
@@ -70,6 +71,13 @@ export default function CitizenHomePage() {
           title={t.citizenHome.tiles.facilities.title}
           description={t.citizenHome.tiles.facilities.desc}
           href="/citizen/facilities"
+          open={t.citizenHome.open}
+        />
+        <Tile
+          icon={<Baby className="h-5 w-5 text-primary" />}
+          title="My family"
+          description="See your children's immunisations and what's due."
+          href="/citizen/family"
           open={t.citizenHome.open}
         />
       </div>

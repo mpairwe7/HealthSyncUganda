@@ -24,14 +24,17 @@ import {
   useAddObservation,
   useCreateEncounter,
   useEncountersByPatient,
+  useFamily,
+  useLinkCaregiver,
   useMarkDeceased,
   usePatient,
+  useUnlinkCaregiver,
 } from "@/lib/api/hooks";
 import { LOINC_SYSTEM, VITAL_CODES } from "@/lib/clinical/loinc";
 import { useAuth } from "@/lib/store/auth";
 import { useUi } from "@/lib/store/ui";
 
-import type { ObservationIn } from "@/types/api";
+import type { CaregiverRelationship, ObservationIn } from "@/types/api";
 
 export default function PatientDetailPage({
   params,
@@ -60,6 +63,13 @@ export default function PatientDetailPage({
   // Inline confirm state for deceased flag
   const [confirmDeceased, setConfirmDeceased] = useState(false);
   const [deceasedPurpose, setDeceasedPurpose] = useState("Death certificate filed");
+
+  // Caregiver-link form state
+  const family = useFamily(id);
+  const linkCaregiver = useLinkCaregiver(id);
+  const unlinkCaregiver = useUnlinkCaregiver(id);
+  const [caregiverNin, setCaregiverNin] = useState("");
+  const [caregiverRel, setCaregiverRel] = useState<CaregiverRelationship>("guardian");
 
   // Add-observation panel state
   const [appendEncounterId, setAppendEncounterId] = useState<string>("");
@@ -187,6 +197,7 @@ export default function PatientDetailPage({
           <TabsTrigger value="encounters">Encounters</TabsTrigger>
           <TabsTrigger value="record">Record new</TabsTrigger>
           <TabsTrigger value="append">Add observation</TabsTrigger>
+          <TabsTrigger value="family">Family</TabsTrigger>
           <TabsTrigger value="identity">Identity</TabsTrigger>
           <TabsTrigger value="admin">Admin</TabsTrigger>
         </TabsList>
@@ -408,6 +419,128 @@ export default function PatientDetailPage({
                     {addObs.isPending ? "Adding…" : "Append observation"}
                   </Button>
                 </div>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="family">
+          <Card>
+            <CardHeader>
+              <CardTitle>Family</CardTitle>
+              <CardDescription>
+                Caregivers linked to this patient. Mothers / fathers / guardians can see this
+                patient&apos;s record from <strong>their</strong> citizen portal once linked. Useful
+                when one parent brings multiple children to the clinic in one visit.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {family.isLoading ? (
+                <Skeleton className="h-20" />
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Name</TableHead>
+                      <TableHead>NIN</TableHead>
+                      <TableHead>Relationship</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(family.data ?? []).map((m) => (
+                      <TableRow key={m.link_id}>
+                        <TableCell>
+                          {m.given_name} {m.family_name}
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">{m.nin}</TableCell>
+                        <TableCell className="capitalize">{m.relationship}</TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => unlinkCaregiver.mutate(m.link_id)}
+                            disabled={unlinkCaregiver.isPending}
+                          >
+                            Unlink
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    {(family.data ?? []).length === 0 && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={4}
+                          className="py-6 text-center text-sm text-muted-foreground"
+                        >
+                          No caregivers linked yet.
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              )}
+
+              <div className="rounded-md border bg-muted/40 p-3">
+                <div className="mb-2 text-sm font-semibold">Link a caregiver</div>
+                <form
+                  className="grid gap-3 sm:grid-cols-[2fr,1fr,auto]"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (!caregiverNin) return;
+                    linkCaregiver.mutate(
+                      {
+                        caregiver_nin: caregiverNin.toUpperCase(),
+                        relationship: caregiverRel,
+                      },
+                      {
+                        onSuccess: () => {
+                          setCaregiverNin("");
+                          setCaregiverRel("guardian");
+                        },
+                      },
+                    );
+                  }}
+                >
+                  <div>
+                    <Label>Caregiver NIN</Label>
+                    <Input
+                      value={caregiverNin}
+                      onChange={(e) => setCaregiverNin(e.target.value)}
+                      placeholder="CM85051712345X"
+                      maxLength={14}
+                      minLength={14}
+                      required
+                      className="font-mono"
+                    />
+                  </div>
+                  <div>
+                    <Label>Relationship</Label>
+                    <select
+                      value={caregiverRel}
+                      onChange={(e) => setCaregiverRel(e.target.value as CaregiverRelationship)}
+                      className="mt-1 block w-full rounded-md border border-input bg-background px-2 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <option value="mother">Mother</option>
+                      <option value="father">Father</option>
+                      <option value="guardian">Guardian</option>
+                      <option value="grandparent">Grandparent</option>
+                      <option value="sibling">Sibling</option>
+                      <option value="aunt">Aunt</option>
+                      <option value="uncle">Uncle</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+                  <div className="flex items-end">
+                    <Button type="submit" disabled={linkCaregiver.isPending}>
+                      {linkCaregiver.isPending ? "Linking…" : "Link"}
+                    </Button>
+                  </div>
+                </form>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  The caregiver must already be enrolled. If not, register them first under{" "}
+                  <strong>Enrol patient</strong>.
+                </p>
               </div>
             </CardContent>
           </Card>

@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Syringe, UserSearch } from "lucide-react";
+import { format } from "date-fns";
+import { AlertTriangle, CheckCircle2, Clock, Syringe, UserSearch } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,7 @@ import {
 import {
   useCreateEncounter,
   useDispense,
+  useImmunisationStatus,
   usePatients,
   useStockSnapshot,
   useSupplyItems,
@@ -35,10 +37,11 @@ import {
 import { useAuth, useAuthHydrated } from "@/lib/store/auth";
 import { useUi } from "@/lib/store/ui";
 
-import type { PatientSummary } from "@/types/api";
+import type { AntigenStatusOut, PatientSummary } from "@/types/api";
 
-// SNOMED-CT bindings for vaccine observations. Mirrors backend/app/seed/data.py
-// VACCINE_CODES so frontend-generated Observations are interoperable.
+const SNOMED_SYSTEM = "http://snomed.info/sct";
+
+// Map supply_item.code → SNOMED. Mirrors backend/app/seed/data.py VACCINE_CODES.
 const VACCINE_SNOMED: Record<string, { code: string; display: string }> = {
   "VAC-BCG-001": { code: "42284007", display: "BCG vaccine product" },
   "VAC-OPV-001": { code: "836382009", display: "Oral polio vaccine product" },
@@ -47,7 +50,16 @@ const VACCINE_SNOMED: Record<string, { code: string; display: string }> = {
   "VAC-PCV-001": { code: "836389000", display: "Pneumococcal conjugate vaccine product" },
   "VAC-YF-001":  { code: "836385006", display: "Yellow fever vaccine product" },
 };
-const SNOMED_SYSTEM = "http://snomed.info/sct";
+
+function statusBadgeVariant(s: AntigenStatusOut["status"]) {
+  switch (s) {
+    case "complete":  return { variant: "success" as const, icon: CheckCircle2, label: "complete" };
+    case "due":       return { variant: "default" as const, icon: Syringe,      label: "due now" };
+    case "due-soon":  return { variant: "default" as const, icon: Clock,        label: "due soon" };
+    case "overdue":   return { variant: "warning" as const, icon: AlertTriangle, label: "overdue" };
+    case "not-yet":   return { variant: "default" as const, icon: Clock,        label: "not yet" };
+  }
+}
 
 export default function WorkerImmunisationsPage() {
   const session = useAuth((s) => s.session);
@@ -63,45 +75,86 @@ export default function WorkerImmunisationsPage() {
   const [selectedPatient, setSelectedPatient] = useState<PatientSummary | null>(null);
   const [vaccineItemId, setVaccineItemId] = useState<string>("");
   const [lotNumber, setLotNumber] = useState("");
+  const [overrideBlock, setOverrideBlock] = useState(false);
+  const [overrideReason, setOverrideReason] = useState("");
 
   const items = useSupplyItems();
   const vaccines = (items.data ?? []).filter((it) => it.category === "vaccine");
 
-  const stock = useStockSnapshot(
-    session?.facility_id ? { district: undefined } : undefined,
-  );
+  const stock = useStockSnapshot();
   const facilityStock = (stock.data ?? []).filter(
     (s) => s.facility_id === session?.facility_id && s.item_code.startsWith("VAC-"),
   );
 
   const search = usePatients({ q: ninQuery.length >= 3 ? ninQuery : undefined, page: 1 });
+  const statusQ = useImmunisationStatus(selectedPatient?.id);
+  const status = statusQ.data ?? [];
+
   const createEncounter = useCreateEncounter();
   const dispense = useDispense();
+
+  // Map SNOMED → status to flag duplicates / advise nurses
+  const statusByCode = useMemo(() => {
+    const m = new Map<string, AntigenStatusOut>();
+    for (const s of status) m.set(s.snomed_code, s);
+    return m;
+  }, [status]);
+
+  function vaccineBlock(item: { code: string }): { blocked: boolean; reason?: string } {
+    const snomed = VACCINE_SNOMED[item.code];
+    if (!snomed) return { blocked: false };
+    const s = statusByCode.get(snomed.code);
+    if (!s) return { blocked: false };
+    if (s.status === "complete") {
+      return {
+        blocked: true,
+        reason: `Series already complete (${s.doses_given}/${s.series_size}). Last dose ${s.last_dose_at ? format(new Date(s.last_dose_at), "yyyy-MM-dd") : "?"}.`,
+      };
+    }
+    if (s.next_due_date && new Date(s.next_due_date) > new Date()) {
+      return {
+        blocked: true,
+        reason: `Next ${s.antigen}${s.next_dose_number} not due until ${s.next_due_date}.`,
+      };
+    }
+    return { blocked: false };
+  }
+
+  const selectedVaccine = vaccines.find((v) => v.id === vaccineItemId);
+  const selectedBlock = selectedVaccine ? vaccineBlock(selectedVaccine) : { blocked: false };
 
   if (!hydrated || !session) return null;
 
   async function onAdminister(e: React.FormEvent) {
     e.preventDefault();
-    if (!selectedPatient || !vaccineItemId || !session?.facility_id) return;
-
-    const vaccineItem = vaccines.find((v) => v.id === vaccineItemId);
-    if (!vaccineItem) return;
-    const snomed = VACCINE_SNOMED[vaccineItem.code];
+    if (!selectedPatient || !vaccineItemId || !session?.facility_id || !selectedVaccine) return;
+    if (selectedBlock.blocked && !overrideBlock) {
+      pushToast({
+        kind: "warning",
+        title: "Blocked by schedule",
+        description: selectedBlock.reason ?? "Vaccine is not due.",
+      });
+      return;
+    }
+    const snomed = VACCINE_SNOMED[selectedVaccine.code];
     if (!snomed) {
       pushToast({
         kind: "error",
-        title: "Unknown vaccine code",
-        description: `${vaccineItem.code} is not mapped to SNOMED — please add it to VACCINE_SNOMED.`,
+        title: "Unknown vaccine",
+        description: `${selectedVaccine.code} is not mapped to SNOMED.`,
       });
       return;
     }
     const now = new Date().toISOString();
+    const reasonNote = lotNumber ? `lot=${lotNumber}` : null;
+    const overrideNote = overrideBlock ? `override=${overrideReason || "(no reason given)"}` : null;
+    const valueString = [reasonNote, overrideNote].filter(Boolean).join("; ") || null;
 
     try {
       const enc = await createEncounter.mutateAsync({
         patient_id: selectedPatient.id,
         facility_id: session.facility_id,
-        reason: `Vaccination — ${snomed.display}`,
+        reason: `Vaccination — ${snomed.display}` + (overrideBlock ? " (override)" : ""),
         started_at: now,
         ended_at: now,
         diagnosis_codes: ["Z23"],
@@ -110,17 +163,15 @@ export default function WorkerImmunisationsPage() {
             code_system: SNOMED_SYSTEM,
             code: snomed.code,
             display: snomed.display,
-            value_string: lotNumber ? `lot=${lotNumber}` : null,
+            value_string: valueString,
             effective_at: now,
           },
         ],
       });
-
-      // If we have a real encounter id (online), decrement supply too.
       if (enc?.id) {
         try {
           await dispense.mutateAsync({
-            supply_item_id: vaccineItem.id,
+            supply_item_id: selectedVaccine.id,
             facility_id: session.facility_id,
             quantity: 1,
             encounter_id: enc.id,
@@ -128,21 +179,21 @@ export default function WorkerImmunisationsPage() {
             purpose: "vaccination",
           });
         } catch (err) {
-          // Dispense is best-effort; the encounter is the system-of-record.
-          // The console will carry the dispense error.
           console.warn("dispense after vaccination failed:", err);
         }
       }
-
       pushToast({
         kind: "success",
         title: "Vaccine administered",
         description: `${snomed.display} → ${selectedPatient.given_name} ${selectedPatient.family_name}`,
       });
-      // Reset form for the next patient
-      setSelectedPatient(null);
-      setNinQuery("");
+      // Reset
+      setVaccineItemId("");
       setLotNumber("");
+      setOverrideBlock(false);
+      setOverrideReason("");
+      // Refresh the status pane so the nurse immediately sees the new dose
+      void statusQ.refetch();
     } catch (err) {
       pushToast({
         kind: "error",
@@ -157,7 +208,8 @@ export default function WorkerImmunisationsPage() {
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Immunisations</h1>
         <p className="text-muted-foreground">
-          Search by NIN, pick a vaccine, capture the lot number, administer.
+          Scan or type the NIN — the system computes who needs what against the UNEPI schedule and
+          blocks duplicate doses.
         </p>
       </div>
 
@@ -170,9 +222,7 @@ export default function WorkerImmunisationsPage() {
             <Syringe className="h-5 w-5 text-primary" aria-hidden />
             <CardTitle>Vaccine stock at your facility</CardTitle>
           </div>
-          <CardDescription>
-            Updated as doses are administered. Low-stock items show in amber.
-          </CardDescription>
+          <CardDescription>Low-stock items in amber. Refreshes as doses are administered.</CardDescription>
         </CardHeader>
         <CardContent>
           {stock.isLoading ? (
@@ -208,7 +258,7 @@ export default function WorkerImmunisationsPage() {
         </CardContent>
       </Card>
 
-      {/* Patient lookup */}
+      {/* Step 1 — Find the patient */}
       <Card>
         <CardHeader>
           <div className="flex items-center gap-2">
@@ -258,15 +308,17 @@ export default function WorkerImmunisationsPage() {
           {selectedPatient && (
             <div className="flex items-center justify-between rounded-md border bg-muted/50 px-3 py-2">
               <span>
-                Selected:{" "}
-                <strong>
-                  {selectedPatient.given_name} {selectedPatient.family_name}
-                </strong>{" "}
-                <span className="font-mono text-xs text-muted-foreground">
-                  ({selectedPatient.nin})
+                Selected: <strong>{selectedPatient.given_name} {selectedPatient.family_name}</strong>{" "}
+                <span className="font-mono text-xs text-muted-foreground">({selectedPatient.nin})</span>
+                <span className="ml-2 text-xs text-muted-foreground">
+                  · {format(new Date(selectedPatient.birth_date), "yyyy-MM-dd")}
                 </span>
               </span>
-              <Button size="sm" variant="outline" onClick={() => setSelectedPatient(null)}>
+              <Button size="sm" variant="outline" onClick={() => {
+                setSelectedPatient(null);
+                setVaccineItemId("");
+                setOverrideBlock(false);
+              }}>
                 Change
               </Button>
             </div>
@@ -274,62 +326,157 @@ export default function WorkerImmunisationsPage() {
         </CardContent>
       </Card>
 
-      {/* Vaccine + administer */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Step 2 — Administer</CardTitle>
-          <CardDescription>
-            Pick the vaccine, capture lot number, click administer. Encounter is auto-created with
-            an SNOMED-coded Observation and the stock is decremented atomically.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form className="grid gap-3 sm:grid-cols-3" onSubmit={onAdminister}>
-            <div>
-              <Label htmlFor="vaccine">Vaccine</Label>
-              <select
-                id="vaccine"
-                value={vaccineItemId}
-                onChange={(e) => setVaccineItemId(e.target.value)}
-                disabled={!selectedPatient}
-                required
-                className="mt-1 block w-full rounded-md border border-input bg-background px-2 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-              >
-                <option value="">— select —</option>
-                {vaccines.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <Label htmlFor="lot">Lot number</Label>
-              <Input
-                id="lot"
-                value={lotNumber}
-                onChange={(e) => setLotNumber(e.target.value)}
-                disabled={!selectedPatient}
-                placeholder="e.g. LOT-GUL-VAC123"
-                maxLength={80}
-              />
-            </div>
-            <div className="flex items-end">
-              <Button
-                type="submit"
-                disabled={
-                  !selectedPatient ||
-                  !vaccineItemId ||
-                  createEncounter.isPending ||
-                  dispense.isPending
-                }
-              >
-                {createEncounter.isPending ? "Recording…" : "Administer"}
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
+      {/* Step 2 — Immunisation status (shown after a patient is picked) */}
+      {selectedPatient && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Step 2 — Schedule status</CardTitle>
+            <CardDescription>
+              Computed against the UNEPI routine schedule. Overdue rows highlighted; complete rows show what's done.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {statusQ.isLoading ? (
+              <Skeleton className="h-32" />
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Antigen</TableHead>
+                    <TableHead>Doses</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Next due</TableHead>
+                    <TableHead>Last dose</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {status.map((s) => {
+                    const b = statusBadgeVariant(s.status);
+                    const Icon = b.icon;
+                    return (
+                      <TableRow
+                        key={s.antigen}
+                        className={s.status === "overdue" ? "bg-amber-50" : undefined}
+                      >
+                        <TableCell>{s.display}</TableCell>
+                        <TableCell className="font-mono">
+                          {s.doses_given}/{s.series_size}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={b.variant} className="gap-1">
+                            <Icon className="h-3 w-3" aria-hidden /> {b.label}
+                          </Badge>
+                          {s.overdue_days > 0 && (
+                            <span className="ml-2 text-xs text-amber-900">
+                              {s.overdue_days}d overdue
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          {s.next_due_date
+                            ? format(new Date(s.next_due_date), "yyyy-MM-dd")
+                            : "—"}
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {s.last_dose_at
+                            ? format(new Date(s.last_dose_at), "yyyy-MM-dd")
+                            : "never"}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Step 3 — Administer */}
+      {selectedPatient && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Step 3 — Administer</CardTitle>
+            <CardDescription>
+              Pick a vaccine. Items already complete OR not yet due are blocked — use Override only with a
+              clinical reason (e.g. catch-up campaign, MoH advisory).
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form className="grid gap-3 sm:grid-cols-3" onSubmit={onAdminister}>
+              <div>
+                <Label htmlFor="vaccine">Vaccine</Label>
+                <select
+                  id="vaccine"
+                  value={vaccineItemId}
+                  onChange={(e) => {
+                    setVaccineItemId(e.target.value);
+                    setOverrideBlock(false);
+                    setOverrideReason("");
+                  }}
+                  required
+                  className="mt-1 block w-full rounded-md border border-input bg-background px-2 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <option value="">— select —</option>
+                  {vaccines.map((v) => {
+                    const b = vaccineBlock(v);
+                    return (
+                      <option key={v.id} value={v.id}>
+                        {v.name}
+                        {b.blocked ? "  — blocked" : ""}
+                      </option>
+                    );
+                  })}
+                </select>
+                {selectedBlock.blocked && (
+                  <p className="mt-1 text-xs text-amber-900">{selectedBlock.reason}</p>
+                )}
+              </div>
+              <div>
+                <Label htmlFor="lot">Lot number</Label>
+                <Input
+                  id="lot"
+                  value={lotNumber}
+                  onChange={(e) => setLotNumber(e.target.value)}
+                  placeholder="e.g. LOT-GUL-VAC123"
+                  maxLength={80}
+                />
+              </div>
+              <div className="flex items-end">
+                <Button
+                  type="submit"
+                  disabled={!vaccineItemId || createEncounter.isPending || dispense.isPending}
+                >
+                  {createEncounter.isPending ? "Recording…" : "Administer"}
+                </Button>
+              </div>
+
+              {selectedBlock.blocked && (
+                <div className="sm:col-span-3 rounded-md border border-amber-300 bg-amber-50 p-3">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={overrideBlock}
+                      onChange={(e) => setOverrideBlock(e.target.checked)}
+                      className="h-4 w-4 accent-amber-700"
+                    />
+                    <span>Override block (clinical decision)</span>
+                  </label>
+                  {overrideBlock && (
+                    <Input
+                      className="mt-2"
+                      value={overrideReason}
+                      onChange={(e) => setOverrideReason(e.target.value)}
+                      placeholder="Reason (recorded in audit log)"
+                      maxLength={200}
+                    />
+                  )}
+                </div>
+              )}
+            </form>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

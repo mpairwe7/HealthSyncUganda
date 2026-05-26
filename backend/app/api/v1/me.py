@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.audit import record_access
 from app.core.security import Principal, get_current_principal
 from app.db.models.audit_log import AuditLog
+from app.db.models.caregiver import CaregiverLink
 from app.db.models.consent import Consent
 from app.db.models.encounter import Encounter, Observation
 from app.db.models.facility import Facility
@@ -29,6 +30,7 @@ from app.db.models.user import User
 from app.db.session import get_db
 from app.schemas.consent import ConsentOut
 from app.schemas.encounter import EncounterOut, ObservationOut
+from app.schemas.family import FamilyMemberOut
 from app.schemas.me import (
     AuditEntryOut,
     ImmunisationOut,
@@ -415,3 +417,63 @@ async def me_staff(
         facility_district=facility.district if facility else None,
         active=user.active,
     )
+
+
+@router.get(
+    "/family",
+    response_model=list[FamilyMemberOut],
+    summary="My family — children I am the caregiver for",
+)
+async def my_family(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    principal: Annotated[Principal, Depends(get_current_principal)],
+) -> list[FamilyMemberOut]:
+    """Children the calling citizen is registered as a caregiver for.
+
+    Real-world UX: a mother logs in with her NIN, hits "My family", and
+    sees a card per child with each child's next-due vaccine. From there
+    she can open one child's record to view full immunisation history.
+
+    Citizen-token only — staff use `GET /patients/{id}/family` instead.
+    """
+    me = await _me_patient(principal, db)
+
+    links = (
+        await db.scalars(
+            select(CaregiverLink).where(CaregiverLink.caregiver_id == me.id)
+        )
+    ).all()
+
+    # Pre-import to avoid circulars when the patients router gets reused.
+    from app.api.v1.patients import _immunisation_status_for
+
+    out: list[FamilyMemberOut] = []
+    for link in links:
+        child = await db.get(Patient, link.child_id)
+        if child is None:
+            continue
+        child_status = await _immunisation_status_for(db, child)
+        overdue = sum(1 for s in child_status if s.status == "overdue")
+        out.append(
+            FamilyMemberOut(
+                link_id=link.id,
+                patient_id=child.id,
+                nin=child.nin,
+                given_name=child.given_name,
+                family_name=child.family_name,
+                birth_date=child.birth_date,
+                gender=child.gender,
+                relationship=link.relationship,
+                overdue_antigen_count=overdue,
+            )
+        )
+
+    await record_access(
+        db,
+        principal=principal,
+        resource_type="Patient",
+        resource_id=me.id,
+        action="read-family-self",
+        purpose="citizen-self-service",
+    )
+    return out
