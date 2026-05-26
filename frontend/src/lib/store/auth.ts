@@ -62,11 +62,15 @@ export const useAuth = create<State>()(
  * `null` even when the user has a valid stored session — gate any
  * "not logged in → redirect to /login" effect on this so the page does
  * not flash to the login screen on reload.
+ *
+ * Implementation note: the initial useState value is `false`, NOT
+ * `useAuth.persist.hasHydrated()`. The latter touches `useAuth.persist`
+ * which is undefined during Next.js's static-page prerender phase
+ * (the persist middleware only wires it on a real browser). The
+ * useEffect then transitions to true on the client.
  */
 export function useAuthHydrated(): boolean {
-  const [hydrated, setHydrated] = useState<boolean>(
-    () => useAuth.persist.hasHydrated(),
-  );
+  const [hydrated, setHydrated] = useState(false);
   useEffect(() => {
     if (useAuth.persist.hasHydrated()) {
       setHydrated(true);
