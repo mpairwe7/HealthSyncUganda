@@ -628,3 +628,225 @@ test.describe("F. Frontend ↔ backend integration", () => {
     expect(wrongTargets).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// G. Authenticated route walk — sidebar/dashboard wiring + flow smoothness
+// ---------------------------------------------------------------------------
+//
+// Walk every page reachable from the post-login dashboards (worker, citizen,
+// admin) and confirm:
+//   1. The page returns 200 (no broken nav link → 404).
+//   2. The page renders without 5xx backend errors.
+//   3. The page exposes its expected primary heading.
+//   4. There is no React hydration / runtime console error.
+//
+// To exercise auth-gated routes we first seed the session via the staff or
+// citizen login API, then write the resulting token + session state into
+// sessionStorage so the Zustand auth store rehydrates as "logged in" on
+// the next navigation. This avoids re-running the browser login form for
+// every route (which would be slow and add noise).
+
+import { BE_URL as BE_URL_FOR_G } from "./playwright.config.staging";
+
+type SessionLike = {
+  token: string;
+  role: string;
+  subject: string;
+  name: string | null;
+  facility_id: string | null;
+  expiresAt: number;
+};
+
+async function fetchStaffSession(
+  identifier: string,
+  password: string,
+): Promise<SessionLike> {
+  const ctx = await pwRequest.newContext({ baseURL: BE_URL_FOR_G });
+  const resp = await ctx.post("/api/v1/auth/login", {
+    data: { identifier, password },
+  });
+  expect(resp.status()).toBe(200);
+  const body = await resp.json();
+  await ctx.dispose();
+  return {
+    token: body.access_token,
+    role: body.role,
+    subject: body.subject,
+    name: body.name ?? null,
+    facility_id: body.facility_id ?? null,
+    expiresAt: Date.now() + body.expires_in * 1000,
+  };
+}
+
+async function fetchCitizenSession(
+  nin: string,
+  otp: string,
+): Promise<SessionLike> {
+  const ctx = await pwRequest.newContext({ baseURL: BE_URL_FOR_G });
+  const resp = await ctx.post("/api/v1/auth/citizen/login", {
+    data: { nin, otp },
+  });
+  expect(resp.status()).toBe(200);
+  const body = await resp.json();
+  await ctx.dispose();
+  return {
+    token: body.access_token,
+    role: body.role,
+    subject: body.subject,
+    name: body.name ?? null,
+    facility_id: null,
+    expiresAt: Date.now() + body.expires_in * 1000,
+  };
+}
+
+async function primeSession(
+  page: import("@playwright/test").Page,
+  session: SessionLike,
+) {
+  // Visit any URL on origin to make sessionStorage writable, then seed.
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.evaluate((s) => {
+    window.sessionStorage.setItem("healthsync.token", s.token);
+    // Mirror the Zustand persist envelope shape so useAuth rehydrates from
+    // sessionStorage on the next navigation. See src/lib/store/auth.ts.
+    window.sessionStorage.setItem(
+      "healthsync.auth",
+      JSON.stringify({ state: { session: s }, version: 0 }),
+    );
+  }, session);
+}
+
+async function checkRoute(
+  page: import("@playwright/test").Page,
+  path: string,
+  expectedHeading: RegExp,
+) {
+  const errors: string[] = [];
+  const consoleErrors: string[] = [];
+  const onResponse = (r: import("@playwright/test").Response) => {
+    if (r.status() >= 500) errors.push(`${r.status()} ${r.url()}`);
+  };
+  const onConsole = (m: import("@playwright/test").ConsoleMessage) => {
+    if (m.type() === "error") {
+      const text = m.text();
+      // Filter platform / icon noise that's not the app's fault
+      if (!text.includes("Failed to load resource") && !text.includes("Manifest")) {
+        consoleErrors.push(text);
+      }
+    }
+  };
+  page.on("response", onResponse);
+  page.on("console", onConsole);
+
+  const resp = await page.goto(path, { waitUntil: "domcontentloaded" });
+  expect(resp?.status(), `GET ${path} status`).toBe(200);
+
+  // Heading appears once the page client component renders post-redirect.
+  await expect(
+    page.getByRole("heading").filter({ hasText: expectedHeading }).first(),
+  ).toBeVisible({ timeout: 10_000 });
+
+  page.off("response", onResponse);
+  page.off("console", onConsole);
+
+  expect(errors, `5xx during ${path}`).toEqual([]);
+  expect(consoleErrors, `console errors during ${path}`).toEqual([]);
+}
+
+test.describe("G. Authenticated route walk (worker + citizen + admin)", () => {
+  test("worker: visits every reachable route from the worker dashboard", async ({ page }) => {
+    const session = await fetchStaffSession("nurse.gulu", "demo1234");
+    await primeSession(page, session);
+
+    await checkRoute(page, "/worker", /worker dashboard/i);
+    await checkRoute(page, "/worker/patients", /patients/i);
+    await checkRoute(page, "/worker/patients/new", /enrol|register|new patient/i);
+    await checkRoute(page, "/worker/supply", /supply|stock/i);
+    await checkRoute(page, "/worker/immunisations", /immunisations/i);
+  });
+
+  test("citizen: visits every reachable route from the citizen portal", async ({ page }) => {
+    const session = await fetchCitizenSession("CM85051712345X", "000000");
+    await primeSession(page, session);
+
+    await checkRoute(page, "/citizen", /welcome/i);
+    await checkRoute(page, "/citizen/records", /my records|records/i);
+    await checkRoute(page, "/citizen/consent", /consent/i);
+    await checkRoute(page, "/citizen/immunisations", /immunisations/i);
+    await checkRoute(page, "/citizen/appointments", /appointments/i);
+    await checkRoute(page, "/citizen/facilities", /facility|facilities/i);
+    await checkRoute(page, "/citizen/audit", /access history|audit/i);
+  });
+
+  test("admin: visits admin dashboard", async ({ page }) => {
+    const session = await fetchStaffSession("admin", "admin1234");
+    await primeSession(page, session);
+
+    await checkRoute(page, "/admin", /admin|dashboard|ministry/i);
+  });
+
+  test("header navigation: worker sees Worker link, can click to /worker", async ({ page }) => {
+    const session = await fetchStaffSession("nurse.gulu", "demo1234");
+    await primeSession(page, session);
+
+    await page.goto("/worker/patients", { waitUntil: "domcontentloaded" });
+    // The top-nav Worker link is rendered for worker/pharmacist sessions.
+    const navLink = page.getByRole("link", { name: /worker dashboard|workerDashboard|^worker$/i }).first();
+    await expect(navLink).toBeVisible({ timeout: 10_000 });
+  });
+
+  test("header navigation: ministry_admin sees Administration link", async ({ page }) => {
+    const session = await fetchStaffSession("admin", "admin1234");
+    await primeSession(page, session);
+
+    await page.goto("/admin", { waitUntil: "domcontentloaded" });
+    const navLink = page.getByRole("link", { name: /administration|admin/i }).first();
+    await expect(navLink).toBeVisible({ timeout: 10_000 });
+  });
+
+  test("worker dashboard tiles: every tile click lands on a 200 page", async ({ page }) => {
+    const session = await fetchStaffSession("nurse.gulu", "demo1234");
+    await primeSession(page, session);
+
+    await page.goto("/worker", { waitUntil: "load" });
+    // Wait for hydration so the dashboard tiles are interactive.
+    await page.waitForFunction(
+      () => !!document.querySelector("h1"),
+      { timeout: 10_000 },
+    );
+
+    const tileHrefs = await page.$$eval('a[href^="/worker"]', (links) =>
+      Array.from(new Set(links.map((a) => (a as HTMLAnchorElement).getAttribute("href"))))
+        .filter((h): h is string => !!h && h !== "/worker"),
+    );
+    // Sanity: dashboard advertises multiple tiles.
+    expect(tileHrefs.length).toBeGreaterThanOrEqual(3);
+
+    for (const href of tileHrefs) {
+      const resp = await page.goto(href, { waitUntil: "domcontentloaded" });
+      expect(resp?.status(), `tile ${href}`).toBe(200);
+    }
+  });
+
+  test("citizen home tiles: every tile click lands on a 200 page", async ({ page }) => {
+    const session = await fetchCitizenSession("CM85051712345X", "000000");
+    await primeSession(page, session);
+
+    await page.goto("/citizen", { waitUntil: "load" });
+    await page.waitForFunction(
+      () => !!document.querySelector("h1"),
+      { timeout: 10_000 },
+    );
+
+    const tileHrefs = await page.$$eval('a[href^="/citizen"]', (links) =>
+      Array.from(new Set(links.map((a) => (a as HTMLAnchorElement).getAttribute("href"))))
+        .filter((h): h is string => !!h && h !== "/citizen" && h !== "/citizen/login"),
+    );
+    expect(tileHrefs.length).toBeGreaterThanOrEqual(4);
+
+    for (const href of tileHrefs) {
+      const resp = await page.goto(href, { waitUntil: "domcontentloaded" });
+      expect(resp?.status(), `tile ${href}`).toBe(200);
+    }
+  });
+});
