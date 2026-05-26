@@ -185,3 +185,60 @@ export type StockOutRisk = {
   reorder_threshold: number;
   days_of_cover_estimated: number | null;
 };
+
+// ── Consent ──────────────────────────────────────────────────────────────────
+
+export type ConsentScope =
+  | "share_records_across_facilities"
+  | "share_with_district_health_office"
+  | "share_with_research"
+  | "share_with_emergency_services";
+
+export type ConsentOut = {
+  id: string;
+  patient_id: string;
+  scope: ConsentScope;
+  purpose: string;
+  granted_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+};
+
+export type OwnConsentGrant = {
+  scope: ConsentScope;
+  purpose: string;
+  expires_at?: string | null;
+};
+
+// ── Me (self-serve) ──────────────────────────────────────────────────────────
+
+export type ImmunisationOut = {
+  id: string;
+  encounter_id: string;
+  patient_id: string;
+  code_system: string;
+  code: string;
+  display: string | null;
+  administered_at: string;
+  facility_id: string | null;
+};
+
+export type AuditEntryOut = {
+  id: string;
+  actor_role: string;
+  actor_facility_id: string | null;
+  action: string;
+  purpose: string | null;
+  resource_type: string;
+  resource_id: string;
+  consent_id: string | null;
+  occurred_at: string;
+};
+
+export type ProfileUpdate = {
+  phone?: string | null;
+  email?: string | null;
+  sub_county?: string | null;
+  parish?: string | null;
+  village?: string | null;
+};

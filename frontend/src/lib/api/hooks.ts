@@ -20,21 +20,26 @@ import { enqueue } from "@/lib/offline/queue";
 import { useUi } from "@/lib/store/ui";
 
 import type {
+  AuditEntryOut,
+  ConsentOut,
+  DistrictEncounterCount,
   EncounterCreate,
   EncounterOut,
   FacilityOut,
   FacilityStockSnapshot,
   ImmunisationCoverage,
+  ImmunisationOut,
+  OwnConsentGrant,
+  PaginatedPatients,
   PatientCreate,
   PatientOut,
   PatientSummary,
-  PaginatedPatients,
+  ProfileUpdate,
   StockOutRisk,
   StockTransferCreate,
   StockTransferOut,
   SupplyItemOut,
   TokenResponse,
-  DistrictEncounterCount,
 } from "@/types/api";
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
@@ -230,5 +235,78 @@ export function useStockOutRisk() {
   return useQuery({
     queryKey: ["analytics", "stock-out"],
     queryFn: () => apiRequest<StockOutRisk[]>("/api/v1/analytics/stock-out-risk"),
+  });
+}
+
+// ── /me — citizen self-serve ─────────────────────────────────────────────────
+//
+// All /me/* endpoints require a citizen-role JWT (the backend rejects others
+// with 403). They use the JWT subject (NIN) to look up the caller's patient
+// row, so no patient_id needs to be passed from the UI.
+
+export function useMe(enabled = true) {
+  return useQuery({
+    queryKey: ["me"],
+    queryFn: () => apiRequest<PatientOut>("/api/v1/me"),
+    enabled,
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useMyEncounters(enabled = true) {
+  return useQuery({
+    queryKey: ["me", "encounters"],
+    queryFn: () => apiRequest<EncounterOut[]>("/api/v1/me/encounters"),
+    enabled,
+  });
+}
+
+export function useMyImmunisations(enabled = true) {
+  return useQuery({
+    queryKey: ["me", "immunisations"],
+    queryFn: () => apiRequest<ImmunisationOut[]>("/api/v1/me/immunisations"),
+    enabled,
+  });
+}
+
+export function useMyAudit(sinceDays: 7 | 30 | 90 = 90, enabled = true) {
+  return useQuery({
+    queryKey: ["me", "audit", sinceDays],
+    queryFn: () =>
+      apiRequest<AuditEntryOut[]>("/api/v1/me/audit", {
+        query: { since_days: sinceDays },
+      }),
+    enabled,
+  });
+}
+
+export function useGrantOwnConsent() {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (body: OwnConsentGrant) =>
+      apiRequest<ConsentOut>("/api/v1/me/consent/grant", { method: "POST", body }),
+    onSuccess: (data) => {
+      pushToast({
+        kind: "success",
+        title: "Consent granted",
+        description: data.scope.replace(/_/g, " "),
+      });
+      qc.invalidateQueries({ queryKey: ["consents"] });
+      qc.invalidateQueries({ queryKey: ["me", "audit"] });
+    },
+  });
+}
+
+export function useUpdateMyProfile() {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (body: ProfileUpdate) =>
+      apiRequest<PatientOut>("/api/v1/me/profile", { method: "PATCH", body }),
+    onSuccess: () => {
+      pushToast({ kind: "success", title: "Profile updated" });
+      qc.invalidateQueries({ queryKey: ["me"] });
+    },
   });
 }

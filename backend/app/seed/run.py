@@ -365,6 +365,67 @@ async def _seed_consents(s: AsyncSession, patient_ids: dict[str, str], admin_id:
         )
 
 
+async def _seed_self_audit_reads(
+    s: AsyncSession,
+    patient_ids: dict[str, str],
+    facility_ids: dict[str, str],
+) -> None:
+    """Insert synthetic prior worker reads into the audit log per patient.
+
+    The /api/v1/me/audit endpoint needs rows to display on first login so
+    citizens can see who has accessed their record. This generator inserts
+    3-5 plausibly-timed reads per patient across the last 60 days, mixing
+    actions ("read", "read-history") and purposes ("clinical-care",
+    "continuity-of-care") so the citizen-facing audit feed has variety.
+
+    Idempotent: a patient who already has any AuditLog row keyed by
+    (resource_type=Patient, resource_id=pid) is skipped — re-running
+    seed-demo never inflates the audit history.
+    """
+    from app.db.models.audit_log import AuditLog
+
+    rnd = random.Random(11)
+    now = datetime.now(UTC)
+    facility_list = list(facility_ids.values())
+    actions = [
+        ("read",         "clinical-care"),
+        ("read-history", "continuity-of-care"),
+        ("read",         "Triage at outpatient"),
+        ("read-history", "Pharmacy dispense look-up"),
+        ("read",         "ANC visit"),
+    ]
+
+    for _nin, pid in patient_ids.items():
+        existing = (
+            await s.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.resource_type == "Patient",
+                    AuditLog.resource_id == pid,
+                )
+                .limit(1)
+            )
+        ).first()
+        if existing is not None:
+            continue
+        for _ in range(rnd.randint(3, 5)):
+            action, purpose = rnd.choice(actions)
+            days_ago = rnd.randint(1, 60)
+            s.add(
+                AuditLog(
+                    actor_id=f"worker-seed-{rnd.randint(1000, 9999)}",
+                    actor_role="worker",
+                    actor_facility_id=rnd.choice(facility_list),
+                    resource_type="Patient",
+                    resource_id=pid,
+                    action=action,
+                    purpose=purpose,
+                    created_at=now - timedelta(days=days_ago, hours=rnd.randint(0, 23)),
+                    updated_at=now - timedelta(days=days_ago, hours=rnd.randint(0, 23)),
+                )
+            )
+
+
 async def main() -> None:
     configure_logging("INFO", json_output=False)
     logger.info("seed.start")
@@ -382,6 +443,7 @@ async def main() -> None:
             await _seed_stock(s, facility_ids, items, admin.id)
             await _seed_encounters(s, patients, facility_ids)
             await _seed_consents(s, patients, admin.id)
+            await _seed_self_audit_reads(s, patients, facility_ids)
     logger.info(
         "seed.done",
         facilities=len(facility_ids),

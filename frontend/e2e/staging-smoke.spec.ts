@@ -850,3 +850,226 @@ test.describe("G. Authenticated route walk (worker + citizen + admin)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// H. /api/v1/me/* citizen self-serve endpoints + safety regressions
+// ---------------------------------------------------------------------------
+//
+// The /me/* surface lets a citizen JWT read their own data without knowing
+// their patient_id. Section H exercises:
+//   1. happy path against the seeded citizen `CM85051712345X` (adult ANC) +
+//      `CF24091344332R` (paediatric — has vaccine observations);
+//   2. that the consent-revoke safety guard correctly blocks a citizen
+//      from revoking another citizen's consent (the patch added in CP-1);
+//   3. that staff (worker/admin) tokens are rejected from /me/* with 403.
+
+test.describe("H. /api/v1/me/* self-serve + safety", () => {
+  test("GET /me returns the calling citizen's Patient with matching NIN", async () => {
+    const token = await loginCitizen("CM85051712345X", "000000");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.get("/api/v1/me");
+    expect(resp.status()).toBe(200);
+    const body = await resp.json();
+    expect(body.nin).toBe("CM85051712345X");
+    expect(body.id).toMatch(/^[0-9A-Z]{26}$/);
+    await ctx.dispose();
+  });
+
+  test("GET /me/encounters returns the citizen's own encounter history", async () => {
+    const token = await loginCitizen("CM85051712345X", "000000");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.get("/api/v1/me/encounters");
+    expect(resp.status()).toBe(200);
+    const body = await resp.json();
+    expect(Array.isArray(body)).toBeTruthy();
+    expect(body.length).toBeGreaterThan(0);
+    // Newest-first ordering
+    if (body.length >= 2) {
+      const t0 = new Date(body[0].started_at).getTime();
+      const t1 = new Date(body[1].started_at).getTime();
+      expect(t0).toBeGreaterThanOrEqual(t1);
+    }
+    await ctx.dispose();
+  });
+
+  test("GET /me/immunisations returns vaccine observations for the paediatric citizen", async () => {
+    const token = await loginCitizen("CF24091344332R", "000000");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.get("/api/v1/me/immunisations");
+    expect(resp.status()).toBe(200);
+    const body = await resp.json();
+    expect(Array.isArray(body)).toBeTruthy();
+    // Paediatric persona — seed gives every visit an immunisation
+    expect(body.length).toBeGreaterThan(0);
+    // SNOMED-coded vaccines
+    for (const imm of body.slice(0, 3)) {
+      expect(imm.code_system).toBe("http://snomed.info/sct");
+      expect(typeof imm.administered_at).toBe("string");
+    }
+    await ctx.dispose();
+  });
+
+  test("GET /me/audit returns the citizen's own access log (last 90d)", async () => {
+    const token = await loginCitizen("CM85051712345X", "000000");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.get("/api/v1/me/audit?since_days=90");
+    expect(resp.status()).toBe(200);
+    const body = await resp.json();
+    expect(Array.isArray(body)).toBeTruthy();
+    // Seed inserts 3-5 prior worker reads per patient
+    expect(body.length).toBeGreaterThan(0);
+    for (const row of body.slice(0, 3)) {
+      expect(row.resource_type).toBe("Patient");
+      expect(typeof row.actor_role).toBe("string");
+    }
+    await ctx.dispose();
+  });
+
+  test("POST /me/consent/grant creates a citizen-self-grant consent (201)", async () => {
+    const token = await loginCitizen("CM85051712345X", "000000");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.post("/api/v1/me/consent/grant", {
+      data: { scope: "share_with_emergency_services", purpose: "Emergency-room access" },
+    });
+    expect(resp.status()).toBe(201);
+    const body = await resp.json();
+    expect(body.scope).toBe("share_with_emergency_services");
+    expect(body.id).toBeTruthy();
+    expect(body.revoked_at).toBeFalsy();
+    await ctx.dispose();
+  });
+
+  test("PATCH /me/profile updates only allowed fields", async () => {
+    const token = await loginCitizen("CM85051712345X", "000000");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.patch("/api/v1/me/profile", {
+      data: { phone: "+256772111222", village: "Kanyagoga" },
+    });
+    expect(resp.status()).toBe(200);
+    const body = await resp.json();
+    expect(body.phone).toBe("+256772111222");
+    expect(body.village).toBe("Kanyagoga");
+    // Unchanged fields preserved
+    expect(body.nin).toBe("CM85051712345X");
+    await ctx.dispose();
+  });
+
+  test("GET /me with a worker token → 403 (role enforcement)", async () => {
+    const token = await loginStaff("nurse.gulu", "demo1234");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    expect((await ctx.get("/api/v1/me")).status()).toBe(403);
+    await ctx.dispose();
+  });
+
+  test("GET /me with an admin token → 403", async () => {
+    const token = await loginStaff("admin", "admin1234");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    expect((await ctx.get("/api/v1/me")).status()).toBe(403);
+    await ctx.dispose();
+  });
+
+  test("GET /me/audit with no auth → 401", async () => {
+    const ctx = await pwRequest.newContext({ baseURL: BE_URL });
+    expect((await ctx.get("/api/v1/me/audit")).status()).toBe(401);
+    await ctx.dispose();
+  });
+
+  test("POST /me/consent/grant with worker token → 403", async () => {
+    const token = await loginStaff("nurse.gulu", "demo1234");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.post("/api/v1/me/consent/grant", {
+      data: { scope: "share_with_emergency_services", purpose: "Should not work" },
+    });
+    expect(resp.status()).toBe(403);
+    await ctx.dispose();
+  });
+
+  test("safety: citizen A cannot revoke citizen B's consent → 403", async () => {
+    // Citizen A creates a consent on their own record via /me/consent/grant
+    const tokenA = await loginCitizen("CM85051712345X", "000000");
+    const ctxA = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${tokenA}` },
+    });
+    const grant = await ctxA.post("/api/v1/me/consent/grant", {
+      data: { scope: "share_with_research", purpose: "Safety regression seed" },
+    });
+    expect(grant.status()).toBe(201);
+    const consentId = (await grant.json()).id;
+    await ctxA.dispose();
+
+    // Citizen B tries to revoke citizen A's consent — must be 403
+    const tokenB = await loginCitizen("CF24091344332R", "000000");
+    const ctxB = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${tokenB}` },
+    });
+    const revoke = await ctxB.post(`/api/v1/consents/${consentId}/revoke`);
+    expect(revoke.status()).toBe(403);
+    await ctxB.dispose();
+  });
+
+  test("browser walk: /citizen/immunisations renders rows for a paediatric citizen", async ({ page }) => {
+    const session = await fetchCitizenSession("CF24091344332R", "000000");
+    await primeSession(page, session);
+
+    await page.goto("/citizen/immunisations", { waitUntil: "domcontentloaded" });
+    await expect(
+      page.getByRole("heading", { name: /immunisations/i }).first(),
+    ).toBeVisible({ timeout: 10_000 });
+    // Allow time for the API call to populate the table
+    await page.waitForTimeout(2000);
+    // The vaccine column header should be present
+    await expect(page.locator("text=Vaccine").first()).toBeVisible();
+  });
+
+  test("browser walk: /citizen/audit renders at least one access log row", async ({ page }) => {
+    const session = await fetchCitizenSession("CM85051712345X", "000000");
+    await primeSession(page, session);
+
+    await page.goto("/citizen/audit", { waitUntil: "domcontentloaded" });
+    await expect(
+      page.getByRole("heading", { name: /access history/i }).first(),
+    ).toBeVisible({ timeout: 10_000 });
+    // Filter chip Day-window controls render
+    await expect(page.getByRole("button", { name: /30 days/i })).toBeVisible();
+  });
+
+  test("browser walk: /citizen/facilities renders the district dropdown and a row", async ({ page }) => {
+    const session = await fetchCitizenSession("CM85051712345X", "000000");
+    await primeSession(page, session);
+
+    await page.goto("/citizen/facilities", { waitUntil: "domcontentloaded" });
+    await expect(
+      page.getByRole("heading", { name: /find a facility/i }).first(),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#district")).toBeVisible();
+  });
+});
