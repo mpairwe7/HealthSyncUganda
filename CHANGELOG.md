@@ -15,6 +15,69 @@ This file is the canonical, audit-facing history of user-visible changes. It is 
 
 ## [Unreleased]
 
+### Added (IM — Immunisation schedule + family graph, commit 8adb5eb..7a80d0b)
+- `backend/app/clinical/unepi_schedule.py` (new) — Uganda UNEPI 2024 routine schedule encoded as a Python module: BCG, OPV0-3, DPT1-3 (pentavalent), PCV1-3, MR1-2, Yellow Fever — each row carries SNOMED CT code, min/max age window, minimum interval from previous dose. `compute_immunisation_status(birth_date, observations)` and `is_duplicate_dose(...)` are pure functions, unit-testable without a DB.
+- `backend/app/db/models/caregiver.py` (new) — `CaregiverLink` ORM model `(caregiver_id, child_id, relationship)` with unique-pair constraint and indices in both directions. Alembic migration `c07e02b0024b_caregiver_links_table.py` creates the table with `ON DELETE CASCADE` FKs.
+- **5 new backend endpoints**:
+  - `GET  /api/v1/patients/{id}/immunisation-status` — per-antigen view (complete / due / due-soon / overdue / not-yet) with `next_due_date` + `overdue_days`.
+  - `GET  /api/v1/patients/{id}/family[?direction=children|caregivers|auto]` — caregiver↔child graph view.
+  - `POST /api/v1/patients/{id}/caregivers` — worker links a caregiver (by NIN) to a child; idempotent + updates relationship label.
+  - `DELETE /api/v1/patients/{id}/caregivers/{link_id}` — unlink.
+  - `GET  /api/v1/me/family` — citizen self-serve list of own children with overdue counts.
+- **Permission helper `_citizen_can_read(principal, patient, db)`** in `app/api/v1/patients.py` replaces three copies of inline NIN-only checks. Now a citizen who is a registered caregiver can read their child's full record (`GET /patients/{id}` + `GET /patients/{id}/immunisation-status`) — closing the most-asked gap from the workflow review.
+- `/worker/immunisations` rebuilt as a **3-step workflow**: find patient → see schedule status (overdue rows highlighted) → administer. The vaccine dropdown flags blocked options (series complete OR not yet due); a separate "Override" checkbox + reason field lets clinicians override for documented cases (catch-up campaigns, MoH advisories). Override reasons land in both the encounter and the audit log.
+- `/citizen/family` (new) — list of children with overdue counts; `/citizen/family/[id]` (new) — per-child immunisation table reachable from the family list.
+- `/worker/patients/[id]` gains a **Family** tab with caregiver link/unlink workflow + NIN search.
+- New TS types + hooks: `useImmunisationStatus`, `useFamily`, `useMyFamily`, `useLinkCaregiver`, `useUnlinkCaregiver`.
+- `_seed_caregivers()` seeds 4 plausible links so demos render meaningful data: Wakiso mother (`CF93081244778K`) → 2 children, Gulu mother → Jinja toddler, Lira guardian → Kampala child.
+- **Playwright section K** (10 tests): immunisation-status shape, family lists, `/me/family`, caregiver-aware READ via `/patients/{id}`, non-caregiver blocked (403), link idempotency + relationship update, self-link rejected (422), unknown caregiver NIN (404), citizen JWT can't POST link (403), browser walk of `/citizen/family`.
+
+### Added (WD — Worker dashboard pilot-tier, commit 82d4908)
+- **5 new backend endpoints** (no migrations — all over existing tables):
+  - `GET  /api/v1/me/staff` — staff profile + facility context (mirror of `/me` for non-citizen tokens).
+  - `POST /api/v1/encounters/{id}/observations` — append late-arriving observations (lab results, follow-up vitals) to an existing encounter.
+  - `PATCH /api/v1/patients/{id}/deceased` — reversible vital-status flag (audited under `mark-deceased` / `clear-deceased`).
+  - `GET  /api/v1/supply/transfers?facility_id&since_days` — transfer history.
+  - `GET  /api/v1/analytics/encounters-by-facility?facility_id&since_days` — per-facility analytics (auto-scopes to caller's facility for `worker`/`pharmacist`; admin can pass any).
+- **Audit gap closure**: `POST /supply/dispense` now records access via `record_access()` and accepts `patient_id` + `purpose` query params (DPPA §12 + ISO 27001 A.12.4.1). The audit row carries `actor_role=pharmacist`, `action=dispense`, and the dispensing target's `resource_id`.
+- 3 new worker pages: `/worker/supply/receive` (record an inbound batch), `/worker/supply/transfers` (history with facility/window filters), `/worker/profile` (identity + session timer + sign-out).
+- `/worker/immunisations` shipped (later rebuilt under IM above) — replaces the previous `<ScopeNote>` stub with a real mass-vaccination workflow.
+- `/worker/patients/[id]` encounter form now captures the full LOINC vitals set (temperature, BP, weight, height, pulse, oxygen saturation, respiratory rate) with min/max guards. New **Add observation** tab + **Admin** (mark-deceased) tab with inline confirm.
+- `/worker` home gains a "This facility" card (today + 30-day encounter counts) and a "My profile" tile.
+- Worker `/error.tsx` boundary, `<OfflineBanner />` component shared across all worker + admin + citizen pages, `useAuthHydrated()` applied to every session-gated worker page (closes the Zustand-persist redirect flash on browser reload).
+- `_seed_transfers()` adds ~6 historical `StockTransfer` rows so the transfers list renders on first login.
+- **Playwright section I** (14 tests): all new endpoints, role enforcement, the dispense-audit fix, citizen-token-against-staff-endpoint rejection, browser walks of every new worker page.
+
+### Added (CP — Citizen portal /me/* surface, commit b7915fd)
+- **6 new backend endpoints** under `/api/v1/me`:
+  - `GET  /me` — own Patient (NIN-bridge primitive every other `/me/*` page uses).
+  - `GET  /me/encounters` — own history, newest-first.
+  - `GET  /me/immunisations` — SNOMED-coded vaccines only.
+  - `GET  /me/audit?since_days=N` — own access log (1-365 day window).
+  - `POST /me/consent/grant` — citizen self-grant consent.
+  - `PATCH /me/profile` — update phone / email / sub_county / parish / village.
+- **Safety fix**: `POST /api/v1/consents/{id}/revoke` previously had no patient-scoping check; any citizen JWT could revoke any consent by ID guess. Now mirrors the NIN-bridge guard from `patients.py`.
+- 3 ScopeNote stubs replaced with real pages: `/citizen/immunisations`, `/citizen/audit` (DPPA §14 transparency view with 7/30/90-day filter chips), `/citizen/facilities` (sortable + OpenStreetMap directions).
+- `/citizen/error.tsx` boundary; "Grant new consent" form added to `/citizen/consent`.
+- `useAuthHydrated()` hook fixes the Zustand-persist hydration race that caused `/citizen/*` to flash to `/login` on browser reload.
+- `_seed_self_audit_reads()` adds 3-5 synthetic prior worker reads per patient so the audit page is populated on first login.
+
+### Added (MR — Mobile responsiveness pass, commit 71db247)
+- New `<MobileNav>` component (`frontend/src/components/layout/mobile-nav.tsx`) — hamburger button + slide-down sheet at `<sm`. Before this, navigation links were `hidden sm:flex` with no fallback — phones literally had no way to switch between citizen/worker/admin sections after login.
+- `Button` default + icon sizes bumped 40px → **44px** (Apple HIG minimum).
+- `Table` wrapper extends to viewport edges on phones; tables forced to `min-w-[640px]` so they horizontally scroll instead of collapsing.
+- `TabsList` wrapped in a horizontally scrollable container so 5-tab worker/patients/[id] header doesn't wrap.
+- `viewportFit: "cover"` + `env(safe-area-inset-top)` padding on the sticky header.
+- Container padding: `0.75rem` default → `1rem` sm → `1.5rem` lg.
+- **Playwright section J** (6 tests at 390x844): login tappable, hamburger visible/hidden by viewport, sheet open/close + role-filtered links, table horizontal scroll, tabs reachable, sticky header.
+
+### Fixed (CI — Crane Cloud deploy keyring bug, commit 2f417a2)
+- `Deploy to Crane Cloud` workflow failed every run from `b7915fd` onward (8+ consecutive failures). Root cause: the workflow seeded `~/.cranecloud/token` from the GitHub secret, but the cranecloud CLI reads its token via `keyring.get_password('cranecloud', 'token')` — the file was decorative. Fixed by installing the `keyring` CLI and piping the secret into the file-backed keyring backend (`PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring`). "Verify CLI session" now explicitly probes the keyring entry before calling `cranecloud auth user` so a seeding failure is reported unambiguously. Cleanup step also clears `XDG_DATA_HOME/python_keyring/keyring_pass.cfg` to prevent stale-token leakage across runs on shared runners.
+
+### Live (staging) — re-verified 2026-05-26 at sha-439fc79
+- 96 Playwright tests pass against live Crane Cloud staging (across 11 describe blocks: Frontend pages, Backend documented endpoints, Auth & access control, Full login flows, Authenticated data flows, Frontend↔backend integration, Authenticated route walk, /me/* + safety, Worker dashboard, Mobile viewport, Immunisation schedule + family).
+- Demo dataset: 26 patients (incl. ANC + paediatric + chronic + caregiver cohorts) across 8 districts, 14 facilities, 14 supply items, 4 caregiver links, 6 transfer history rows, populated audit log per patient.
+
 ### Added (P1 — Full CI/CD pipeline for Crane Cloud + Docker Hub)
 - `.github/workflows/deploy-cranecloud.yml` overhauled: switched keyring backend from `null` to `keyrings.alt.file.PlaintextKeyring`; dropped `docker.io/` prefix on image refs; added pre-update capture of current image (for rollback); post-update health-check polling (6-min budget); **automatic rollback to previous image** if health check fails; smoke-test of `/fhir/metadata` + `/openapi.json` + `/api/v1/patients` 401 expectation; structured run-summary with live URLs + clickable probe links; PR comment with deployed URL when triggered with `pr_number`.
 - `.github/workflows/deploy-databases.yml` (new): one-shot `workflow_dispatch` flow for Postgres + Redis (separate from rolling backend/frontend); five actions (`create-postgres`, `create-redis`, `create-both`, `update-postgres-image`, `update-redis-image`); surfaces ready-to-paste `gh secret set` commands in the run summary.
