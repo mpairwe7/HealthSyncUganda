@@ -325,30 +325,55 @@ test.describe("D. Full login flows (browser)", () => {
     await ctx.dispose();
   });
 
+  // Wait helpers shared by the browser-form tests below.
+  //
+  // The "Sign in" button has Tailwind `transition-colors` (and Playwright
+  // hovers before clicking, which triggers the colour transition). The
+  // stability check then occasionally sees the button as "not stable"
+  // even after hydration completes — a well-known interaction between
+  // Playwright actionability and Tailwind hover transitions. `force: true`
+  // skips just the visibility / enabled / stable checks (NOT the locator
+  // resolution) — the click still goes through React's onSubmit handler.
+  //
+  // We use `waitUntil: "load"` (not the lighter "domcontentloaded") so
+  // that the Next.js bundle has executed and React has hydrated before we
+  // fill the controlled inputs — otherwise the inputs accept text at the
+  // DOM level but React's `value` state stays empty and the form submits
+  // an empty payload (which the backend rejects with 422).
+  async function gotoFormPage(page: import("@playwright/test").Page, path: string) {
+    await page.goto(path, { waitUntil: "load" });
+    // Belt-and-braces hydration confirmation: the form's React fiber is
+    // attached only after hydration. ~1s on staging.
+    await page.waitForFunction(
+      () => {
+        const form = document.querySelector("form");
+        return (
+          !!form &&
+          Object.keys(form).some(
+            (k) => k.startsWith("__reactFiber") || k.startsWith("__reactProps"),
+          )
+        );
+      },
+      { timeout: 10_000 },
+    );
+  }
+
   test("browser staff login: fills form, submits, receives token, redirects", async ({ page }) => {
     const serverErrors: string[] = [];
-    const consoleErrors: string[] = [];
     page.on("response", (r) => {
       if (r.status() >= 500) serverErrors.push(`${r.status()} ${r.url()}`);
     });
-    page.on("console", (msg) => {
-      if (msg.type() === "error") consoleErrors.push(msg.text());
-    });
 
-    await page.goto("/login", { waitUntil: "domcontentloaded" });
-
+    await gotoFormPage(page, "/login");
     await page.locator("#username").fill("admin");
     await page.locator("#password").fill("admin1234");
 
-    // Wait for the actual login response — deterministic, no arbitrary sleep.
-    // The Next.js router push happens in onSuccess, so we wait both for the
-    // response and the navigation away from /login.
     const [loginResp] = await Promise.all([
       page.waitForResponse(
         (r) => r.url().includes("/api/v1/auth/login") && r.request().method() === "POST",
         { timeout: 15_000 },
       ),
-      page.locator("button[type=submit]").first().click(),
+      page.locator("button[type=submit]").click({ force: true }),
     ]);
 
     expect(loginResp.status()).toBe(200);
@@ -356,31 +381,18 @@ test.describe("D. Full login flows (browser)", () => {
     expect(body.role).toBe("ministry_admin");
     expect(body.access_token?.length).toBeGreaterThan(50);
 
-    // Wait for the post-login redirect (router.push("/admin") for ministry_admin).
     await page.waitForURL(/\/admin/, { timeout: 10_000 });
 
-    // Token should be persisted to sessionStorage by the Zustand store.
     const token = await page.evaluate(() =>
       window.sessionStorage.getItem("healthsync.token"),
     );
     expect(token).toBeTruthy();
     expect(token).toBe(body.access_token);
-
-    // No server errors during the flow.
     expect(serverErrors).toEqual([]);
-    // Console errors are best-effort (some chrome internals log noisily);
-    // log them but don't fail unless they reference the app's own code.
-    const appConsoleErrors = consoleErrors.filter(
-      (e) => !e.includes("Failed to load resource") && !e.includes("Manifest"),
-    );
-    if (appConsoleErrors.length > 0) {
-      console.warn("Browser console errors during login:", appConsoleErrors);
-    }
   });
 
   test("browser nurse login: redirects worker role to /worker", async ({ page }) => {
-    await page.goto("/login", { waitUntil: "domcontentloaded" });
-
+    await gotoFormPage(page, "/login");
     await page.locator("#username").fill("nurse.gulu");
     await page.locator("#password").fill("demo1234");
 
@@ -389,19 +401,16 @@ test.describe("D. Full login flows (browser)", () => {
         (r) => r.url().includes("/api/v1/auth/login") && r.request().method() === "POST",
         { timeout: 15_000 },
       ),
-      page.locator("button[type=submit]").first().click(),
+      page.locator("button[type=submit]").click({ force: true }),
     ]);
 
     expect(loginResp.status()).toBe(200);
     expect((await loginResp.json()).role).toBe("worker");
-
-    // worker → /worker (not /admin)
     await page.waitForURL(/\/worker/, { timeout: 10_000 });
   });
 
-  test("browser staff login with wrong credentials: stays on /login, shows error", async ({ page }) => {
-    await page.goto("/login", { waitUntil: "domcontentloaded" });
-
+  test("browser staff login with wrong credentials: stays on /login, no token stored", async ({ page }) => {
+    await gotoFormPage(page, "/login");
     await page.locator("#username").fill("admin");
     await page.locator("#password").fill("wrongpassword");
 
@@ -410,16 +419,14 @@ test.describe("D. Full login flows (browser)", () => {
         (r) => r.url().includes("/api/v1/auth/login") && r.request().method() === "POST",
         { timeout: 15_000 },
       ),
-      page.locator("button[type=submit]").first().click(),
+      page.locator("button[type=submit]").click({ force: true }),
     ]);
 
     expect(loginResp.status()).toBe(401);
 
-    // Should NOT navigate away.
     await page.waitForTimeout(1500);
     expect(page.url()).toMatch(/\/login$/);
 
-    // No token stored.
     const token = await page.evaluate(() =>
       window.sessionStorage.getItem("healthsync.token"),
     );
