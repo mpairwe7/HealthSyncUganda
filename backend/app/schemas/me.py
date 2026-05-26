@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -63,4 +62,3 @@ class ProfileUpdate(BaseModel):
     village: str | None = Field(default=None, max_length=80)
 
 
-AuditWindow = Literal[7, 30, 90]

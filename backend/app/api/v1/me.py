@@ -29,7 +29,6 @@ from app.schemas.consent import ConsentOut
 from app.schemas.encounter import EncounterOut, ObservationOut
 from app.schemas.me import (
     AuditEntryOut,
-    AuditWindow,
     ImmunisationOut,
     OwnConsentGrant,
     ProfileUpdate,
@@ -253,7 +252,7 @@ async def my_immunisations(
 async def my_audit(
     db: Annotated[AsyncSession, Depends(get_db)],
     principal: Annotated[Principal, Depends(get_current_principal)],
-    since_days: Annotated[AuditWindow, Query(description="Window in days (7/30/90)")] = 90,
+    since_days: Annotated[int, Query(ge=1, le=365, description="Window in days (1-365)")] = 90,
 ) -> list[AuditEntryOut]:
     p = await _me_patient(principal, db)
     cutoff = datetime.now(UTC) - timedelta(days=since_days)
