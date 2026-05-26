@@ -25,8 +25,13 @@ type State = {
   dismissToast: (id: string) => void;
 };
 
+// Hydration safety: initialize `online: true` unconditionally. Node 21+ has a
+// global `navigator` whose `onLine` property is undefined → would render as
+// "offline" on SSR while the browser renders "online" → React hydration
+// mismatch (#418). The Providers' useEffect calls setOnline(navigator.onLine)
+// on mount, so the first effective render after hydration is the real state.
 export const useUi = create<State>((set) => ({
-  online: typeof navigator !== "undefined" ? navigator.onLine : true,
+  online: true,
   pendingSyncCount: 0,
   toasts: [],
   setOnline: (online) => set({ online }),
