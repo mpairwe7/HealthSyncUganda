@@ -1,4 +1,4 @@
-"""DTOs for the `/api/v1/me/*` citizen-self-serve endpoints."""
+"""DTOs for the `/api/v1/me/*` self-serve endpoints (citizen + staff)."""
 
 from __future__ import annotations
 
@@ -60,5 +60,24 @@ class ProfileUpdate(BaseModel):
     sub_county: str | None = Field(default=None, max_length=80)
     parish: str | None = Field(default=None, max_length=80)
     village: str | None = Field(default=None, max_length=80)
+
+
+class StaffMeOut(BaseModel):
+    """Result of `GET /api/v1/me/staff` — staff profile + facility context.
+
+    Returned to any non-citizen JWT (worker / pharmacist / district_admin /
+    ministry_admin). Surfaces only the fields the worker dashboard needs:
+    role, facility, JWT expiry — never password_hash or internal flags.
+    """
+
+    user_id: str
+    username: str
+    full_name: str
+    role: str
+    facility_id: str | None = None
+    facility_name: str | None = None
+    facility_level: str | None = None
+    facility_district: str | None = None
+    active: bool = True
 
 

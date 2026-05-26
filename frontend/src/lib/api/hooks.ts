@@ -22,19 +22,26 @@ import { useUi } from "@/lib/store/ui";
 import type {
   AuditEntryOut,
   ConsentOut,
+  DispenseQuery,
+  DispenseResult,
   DistrictEncounterCount,
   EncounterCreate,
   EncounterOut,
+  FacilityEncounterCount,
   FacilityOut,
   FacilityStockSnapshot,
   ImmunisationCoverage,
   ImmunisationOut,
+  MarkDeceasedBody,
+  ObservationIn,
   OwnConsentGrant,
   PaginatedPatients,
   PatientCreate,
   PatientOut,
   PatientSummary,
   ProfileUpdate,
+  ReceiveStockBody,
+  StaffMeOut,
   StockOutRisk,
   StockTransferCreate,
   StockTransferOut,
@@ -308,5 +315,114 @@ export function useUpdateMyProfile() {
       pushToast({ kind: "success", title: "Profile updated" });
       qc.invalidateQueries({ queryKey: ["me"] });
     },
+  });
+}
+
+// ── Worker self-serve + clinical workflows ───────────────────────────────────
+
+export function useMyStaff(enabled = true) {
+  return useQuery({
+    queryKey: ["me", "staff"],
+    queryFn: () => apiRequest<StaffMeOut>("/api/v1/me/staff"),
+    enabled,
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useEncountersByFacility(
+  filters: { facility_id?: string; since_days?: number } = {},
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["analytics", "encounters-by-facility", filters],
+    queryFn: () =>
+      apiRequest<FacilityEncounterCount[]>("/api/v1/analytics/encounters-by-facility", {
+        query: filters,
+      }),
+    enabled,
+  });
+}
+
+export function useAddObservation(encounterId: string | undefined) {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (body: ObservationIn[]) =>
+      apiRequest<EncounterOut>(`/api/v1/encounters/${encounterId}/observations`, {
+        method: "POST",
+        body,
+      }),
+    onSuccess: (data) => {
+      pushToast({
+        kind: "success",
+        title: "Observation added",
+        description: `${data.observations.length} observations on record`,
+      });
+      qc.invalidateQueries({ queryKey: ["encounters", data.patient_id] });
+      qc.invalidateQueries({ queryKey: ["me", "encounters"] });
+    },
+  });
+}
+
+export function useMarkDeceased() {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: ({ patientId, body }: { patientId: string; body: MarkDeceasedBody }) =>
+      apiRequest<PatientOut>(`/api/v1/patients/${patientId}/deceased`, {
+        method: "PATCH",
+        body,
+      }),
+    onSuccess: (data) => {
+      pushToast({
+        kind: data.deceased ? "warning" : "success",
+        title: data.deceased ? "Marked as deceased" : "Flag cleared",
+      });
+      qc.invalidateQueries({ queryKey: ["patient", data.id] });
+      qc.invalidateQueries({ queryKey: ["patients"] });
+    },
+  });
+}
+
+export function useReceiveStock() {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (body: ReceiveStockBody) =>
+      apiRequest<{ id: string }>("/api/v1/supply/batches", { method: "POST", body }),
+    onSuccess: () => {
+      pushToast({ kind: "success", title: "Stock received and recorded" });
+      qc.invalidateQueries({ queryKey: ["supply"] });
+      qc.invalidateQueries({ queryKey: ["analytics", "stock-out"] });
+    },
+  });
+}
+
+export function useDispense() {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (q: DispenseQuery) =>
+      apiRequest<DispenseResult>("/api/v1/supply/dispense", {
+        method: "POST",
+        query: { ...q },
+        // dispense uses query params on the backend; body is unused.
+      }),
+    onSuccess: () => {
+      pushToast({ kind: "success", title: "Dispense recorded" });
+      qc.invalidateQueries({ queryKey: ["supply"] });
+    },
+  });
+}
+
+export function useStockTransfers(
+  filters: { facility_id?: string; since_days?: number } = {},
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["supply", "transfers", filters],
+    queryFn: () =>
+      apiRequest<StockTransferOut[]>("/api/v1/supply/transfers", { query: filters }),
+    enabled,
   });
 }

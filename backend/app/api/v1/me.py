@@ -23,7 +23,9 @@ from app.core.security import Principal, get_current_principal
 from app.db.models.audit_log import AuditLog
 from app.db.models.consent import Consent
 from app.db.models.encounter import Encounter, Observation
+from app.db.models.facility import Facility
 from app.db.models.patient import Patient
+from app.db.models.user import User
 from app.db.session import get_db
 from app.schemas.consent import ConsentOut
 from app.schemas.encounter import EncounterOut, ObservationOut
@@ -32,6 +34,7 @@ from app.schemas.me import (
     ImmunisationOut,
     OwnConsentGrant,
     ProfileUpdate,
+    StaffMeOut,
 )
 from app.schemas.patient import PatientOut
 
@@ -359,3 +362,56 @@ async def update_profile(
         extra={"changed_fields": list(changes.keys())},
     )
     return _patient_to_out(p)
+
+
+# ── Staff self-serve ────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/staff",
+    response_model=StaffMeOut,
+    summary="My staff profile + facility context",
+)
+async def me_staff(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    principal: Annotated[Principal, Depends(get_current_principal)],
+) -> StaffMeOut:
+    """Resolve the calling staff member's User row + their facility name/level.
+
+    The citizen `/me` endpoint is the counterpart for citizen tokens; this is
+    its staff-side mirror. Refuses citizen tokens with 403.
+
+    Looks up `User.id == principal.subject` (for staff tokens, the JWT
+    subject is the user ULID — confirmed in `app/api/v1/auth.py`
+    `staff_login`).
+    """
+    if principal.role == "citizen":
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "/me/staff is for staff tokens only — use /me for citizen profiles",
+        )
+
+    user = await db.get(User, principal.subject)
+    if user is None:
+        # JWT is valid but the staff row was deleted/disabled between login
+        # and this call — surface as 404 so the client can sign-out cleanly.
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "Staff record not found — your session may be stale.",
+        )
+
+    facility: Facility | None = None
+    if user.facility_id:
+        facility = await db.get(Facility, user.facility_id)
+
+    return StaffMeOut(
+        user_id=user.id,
+        username=user.username,
+        full_name=user.full_name,
+        role=user.role,
+        facility_id=user.facility_id,
+        facility_name=facility.name if facility else None,
+        facility_level=facility.level if facility else None,
+        facility_district=facility.district if facility else None,
+        active=user.active,
+    )

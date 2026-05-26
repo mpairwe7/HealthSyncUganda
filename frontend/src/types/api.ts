@@ -242,3 +242,54 @@ export type ProfileUpdate = {
   parish?: string | null;
   village?: string | null;
 };
+
+// ── Staff self-serve + worker workflows ──────────────────────────────────────
+
+export type StaffMeOut = {
+  user_id: string;
+  username: string;
+  full_name: string;
+  role: Role;
+  facility_id: string | null;
+  facility_name: string | null;
+  facility_level: string | null;
+  facility_district: string | null;
+  active: boolean;
+};
+
+export type MarkDeceasedBody = {
+  deceased: boolean;
+  purpose?: string | null;
+};
+
+export type FacilityEncounterCount = {
+  facility_id: string;
+  facility_name: string;
+  district: string;
+  encounter_count: number;
+  patient_count: number;
+};
+
+export type ReceiveStockBody = {
+  supply_item_id: string;
+  facility_id: string;
+  lot_number: string;
+  quantity: number;
+  expires_on: string;        // YYYY-MM-DD
+  received_on: string;       // YYYY-MM-DD
+  cost_ugx?: number | null;
+};
+
+export type DispenseQuery = {
+  supply_item_id: string;
+  facility_id: string;
+  quantity: number;
+  encounter_id?: string | null;
+  patient_id?: string | null;
+  purpose?: string;
+};
+
+export type DispenseResult = {
+  dispensed_quantity: number;
+  events_recorded: number;
+};

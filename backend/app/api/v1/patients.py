@@ -21,6 +21,7 @@ from app.db.session import get_db
 from app.schemas.common import Page
 from app.schemas.patient import (
     PatientCreate,
+    PatientDeceased,
     PatientOut,
     PatientSummary,
     PatientUpdate,
@@ -202,5 +203,41 @@ async def update_patient(
         action="update",
         purpose="record-correction",
         extra={"fields": list(changes.keys())},
+    )
+    return _to_out(p)
+
+
+@router.patch(
+    "/{patient_id}/deceased",
+    response_model=PatientOut,
+    summary="Mark a patient as deceased (or revive — reversible)",
+)
+async def set_deceased(
+    patient_id: str,
+    body: PatientDeceased,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    principal: Annotated[Principal, Depends(require_role("worker"))],
+) -> PatientOut:
+    """Set the patient's `deceased` flag. Audited under `mark-deceased`.
+
+    This is reversible (workers can clear the flag too) but every change is
+    recorded — DPPA §22 + clinical-data-integrity controls. The encounter
+    history is preserved either way.
+    """
+    p = await db.get(Patient, patient_id)
+    if p is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Patient not found")
+
+    p.deceased = body.deceased
+    p.record_version += 1
+    await db.flush()
+
+    await record_access(
+        db,
+        principal=principal,
+        resource_type="Patient",
+        resource_id=p.id,
+        action="mark-deceased" if body.deceased else "clear-deceased",
+        purpose=body.purpose or "vital-status-update",
     )
     return _to_out(p)

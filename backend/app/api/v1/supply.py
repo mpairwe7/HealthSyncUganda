@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import record_access
@@ -335,6 +335,14 @@ async def dispense_endpoint(
     facility_id: str = Query(...),
     quantity: int = Query(..., gt=0),
     encounter_id: str | None = Query(None),
+    patient_id: str | None = Query(
+        None,
+        description="Patient receiving the supply (audit trail). Optional for stock corrections.",
+    ),
+    purpose: str = Query(
+        "medication-dispense",
+        description="Audit purpose label (e.g. 'medication-dispense', 'vaccination', 'wastage').",
+    ),
 ) -> dict[str, str | int]:
     from app.services.supply_ledger import dispense as _dispense
 
@@ -350,4 +358,70 @@ async def dispense_endpoint(
     except InsufficientStockError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 
+    # Audit gap closure (DPPA §12 + ISO 27001 A.12.4.1) — every pharmacist
+    # dispense must be traceable to actor + patient + supply item. The
+    # resource_id is the patient when known, otherwise the supply item.
+    await record_access(
+        db,
+        principal=principal,
+        resource_type="Patient" if patient_id else "SupplyItem",
+        resource_id=patient_id or supply_item_id,
+        action="dispense",
+        purpose=purpose,
+        extra={
+            "supply_item_id": supply_item_id,
+            "facility_id": facility_id,
+            "quantity": quantity,
+            "encounter_id": encounter_id,
+            "events_recorded": len(events),
+        },
+    )
+
     return {"dispensed_quantity": quantity, "events_recorded": len(events)}
+
+
+@router.get(
+    "/transfers",
+    response_model=list[StockTransferOut],
+    summary="List recent stock transfers",
+)
+async def list_transfers(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[Principal, Depends(require_role("worker"))],
+    facility_id: str | None = Query(
+        None,
+        description="Filter to transfers where this facility is either source OR destination.",
+    ),
+    since_days: int = Query(90, ge=1, le=365),
+    limit: int = Query(200, ge=1, le=500),
+) -> list[StockTransferOut]:
+    cutoff = datetime.now(UTC) - timedelta(days=since_days)
+    stmt = (
+        select(StockTransfer)
+        .where(StockTransfer.initiated_at >= cutoff)
+        .order_by(StockTransfer.initiated_at.desc())
+        .limit(limit)
+    )
+    if facility_id:
+        stmt = stmt.where(
+            or_(
+                StockTransfer.from_facility_id == facility_id,
+                StockTransfer.to_facility_id == facility_id,
+            )
+        )
+    rows = (await db.scalars(stmt)).all()
+    return [
+        StockTransferOut(
+            id=t.id,
+            from_facility_id=t.from_facility_id,
+            to_facility_id=t.to_facility_id,
+            supply_item_id=t.supply_item_id,
+            quantity=t.quantity,
+            reason=t.reason,
+            status=t.status,  # type: ignore[arg-type]
+            initiated_by=t.initiated_by,
+            initiated_at=t.initiated_at,
+            completed_at=t.completed_at,
+        )
+        for t in rows
+    ]

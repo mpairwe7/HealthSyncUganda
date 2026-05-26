@@ -14,7 +14,7 @@ from app.core.security import Principal, require_role
 from app.db.models.encounter import Encounter, Observation
 from app.db.models.patient import Patient
 from app.db.session import get_db
-from app.schemas.encounter import EncounterCreate, EncounterOut, ObservationOut
+from app.schemas.encounter import EncounterCreate, EncounterOut, ObservationIn, ObservationOut
 
 router = APIRouter(prefix="/encounters", tags=["encounters"])
 logger = get_logger(__name__)
@@ -146,3 +146,60 @@ async def list_encounters(
         purpose="clinical-care",
     )
     return [_to_out(r) for r in rows]
+
+
+@router.post(
+    "/{encounter_id}/observations",
+    response_model=EncounterOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Append observations to an existing encounter",
+)
+async def append_observations(
+    encounter_id: str,
+    body: list[ObservationIn],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    principal: Annotated[Principal, Depends(require_role("worker"))],
+) -> EncounterOut:
+    """Append one or more Observations to an existing encounter.
+
+    Useful when a clinician adds late-arriving results (lab values, imaging
+    reads, follow-up vitals) after the encounter was created. The encounter
+    itself is left in-place; only its `observations` relationship grows.
+    """
+    enc = await db.get(Encounter, encounter_id)
+    if enc is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Encounter not found")
+    if not body:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "At least one observation is required.",
+        )
+
+    for ob in body:
+        db.add(
+            Observation(
+                encounter_id=enc.id,
+                patient_id=enc.patient_id,
+                code_system=ob.code_system,
+                code=ob.code,
+                display=ob.display,
+                value_quantity=ob.value_quantity,
+                value_unit=ob.value_unit,
+                value_string=ob.value_string,
+                effective_at=ob.effective_at,
+                recorded_by=principal.subject,
+            )
+        )
+    await db.flush()
+    await db.refresh(enc, attribute_names=["observations"])
+
+    await record_access(
+        db,
+        principal=principal,
+        resource_type="Encounter",
+        resource_id=enc.id,
+        action="append-observations",
+        purpose="clinical-care",
+        extra={"observation_count": len(body)},
+    )
+    return _to_out(enc)

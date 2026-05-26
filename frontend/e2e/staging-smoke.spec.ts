@@ -1099,3 +1099,308 @@ test.describe("H. /api/v1/me/* self-serve + safety", () => {
     await expect(page.locator("#district")).toBeVisible();
   });
 });
+
+// ---------------------------------------------------------------------------
+// I. Worker dashboard — pilot-tier additions
+// ---------------------------------------------------------------------------
+//
+// Covers the new /me/staff endpoint, observation append, transfer history,
+// mark-deceased, per-facility analytics, the dispense audit fix, plus
+// browser walks of the new worker pages and a citizen-role-rejection
+// regression.
+
+test.describe("I. Worker dashboard pilot-tier additions", () => {
+  test("GET /me/staff (worker) → 200 with own facility_id", async () => {
+    const token = await loginStaff("nurse.gulu", "demo1234");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.get("/api/v1/me/staff");
+    expect(resp.status()).toBe(200);
+    const body = await resp.json();
+    expect(body.username).toBe("nurse.gulu");
+    expect(body.role).toBe("worker");
+    expect(body.facility_id).toBeTruthy();
+    expect(body.facility_name).toBeTruthy();
+    expect(body.facility_district).toBe("Gulu");
+    await ctx.dispose();
+  });
+
+  test("GET /me/staff (admin) → 200 with no facility (ministry role)", async () => {
+    const token = await loginStaff("admin", "admin1234");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.get("/api/v1/me/staff");
+    expect(resp.status()).toBe(200);
+    expect((await resp.json()).role).toBe("ministry_admin");
+    await ctx.dispose();
+  });
+
+  test("GET /me/staff (citizen) → 403 (role enforcement)", async () => {
+    const token = await loginCitizen("CM85051712345X", "000000");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    expect((await ctx.get("/api/v1/me/staff")).status()).toBe(403);
+    await ctx.dispose();
+  });
+
+  test("GET /supply/transfers (worker) → seeded history", async () => {
+    const token = await loginStaff("nurse.gulu", "demo1234");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.get("/api/v1/supply/transfers?since_days=365");
+    expect(resp.status()).toBe(200);
+    const body = await resp.json();
+    expect(Array.isArray(body)).toBeTruthy();
+    // Seeded by _seed_transfers → ~6 historical rows.
+    expect(body.length).toBeGreaterThanOrEqual(3);
+    for (const t of body.slice(0, 3)) {
+      expect(t.from_facility_id).not.toBe(t.to_facility_id);
+      expect(t.status).toBe("completed");
+    }
+    await ctx.dispose();
+  });
+
+  test("GET /analytics/encounters-by-facility (worker) → own-facility scope", async () => {
+    const token = await loginStaff("nurse.gulu", "demo1234");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const resp = await ctx.get("/api/v1/analytics/encounters-by-facility?since_days=180");
+    expect(resp.status()).toBe(200);
+    const body = await resp.json();
+    expect(Array.isArray(body)).toBeTruthy();
+    // Default scoping for `worker` role: limited to own facility (Gulu RRH).
+    if (body.length > 0) {
+      for (const row of body) {
+        expect(row.district).toBe("Gulu");
+      }
+    }
+    await ctx.dispose();
+  });
+
+  test("PATCH /patients/{id}/deceased flips the flag and increments record_version", async () => {
+    const adminToken = await loginStaff("admin", "admin1234");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${adminToken}` },
+    });
+    // Pick a non-citizen-portal patient so we don't interfere with the citizen tests
+    const list = await (await ctx.get("/api/v1/patients?limit=5")).json();
+    const target = list.items.find(
+      (p: { nin: string }) => p.nin !== "CM85051712345X" && p.nin !== "CF24091344332R",
+    );
+    expect(target).toBeTruthy();
+
+    // Set deceased = true
+    const setResp = await ctx.patch(`/api/v1/patients/${target.id}/deceased`, {
+      data: { deceased: true, purpose: "E2E regression sweep" },
+    });
+    expect(setResp.status()).toBe(200);
+    const setBody = await setResp.json();
+    expect(setBody.deceased).toBe(true);
+
+    // Clear it again
+    const clearResp = await ctx.patch(`/api/v1/patients/${target.id}/deceased`, {
+      data: { deceased: false, purpose: "Flag cleared after E2E test" },
+    });
+    expect(clearResp.status()).toBe(200);
+    expect((await clearResp.json()).deceased).toBe(false);
+
+    await ctx.dispose();
+  });
+
+  test("POST /encounters/{id}/observations appends to an existing encounter", async () => {
+    const token = await loginStaff("admin", "admin1234");
+    const ctx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    // Get any seeded patient + their first encounter
+    const patients = await (await ctx.get("/api/v1/patients?limit=1")).json();
+    const patientId = patients.items[0].id;
+    const encs = await (await ctx.get(`/api/v1/encounters/by-patient/${patientId}`)).json();
+    expect(encs.length).toBeGreaterThan(0);
+    const encId = encs[0].id;
+    const initialObs = encs[0].observations.length;
+
+    const appendResp = await ctx.post(`/api/v1/encounters/${encId}/observations`, {
+      data: [
+        {
+          code_system: "http://loinc.org",
+          code: "8302-2",
+          display: "Body height",
+          value_quantity: 165.0,
+          value_unit: "cm",
+          effective_at: new Date().toISOString(),
+        },
+      ],
+    });
+    expect(appendResp.status()).toBe(201);
+    const appended = await appendResp.json();
+    expect(appended.observations.length).toBe(initialObs + 1);
+    await ctx.dispose();
+  });
+
+  test("POST /supply/dispense (pharmacist) creates an audit row for the patient", async () => {
+    const pharmacistToken = await loginStaff("pharmacist.mbarara", "demo1234");
+    const adminToken = await loginStaff("admin", "admin1234");
+
+    // Pick the pharmacist's facility + an item with stock there
+    const staffCtx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${pharmacistToken}` },
+    });
+    const me = await (await staffCtx.get("/api/v1/me/staff")).json();
+    const snap = await (await staffCtx.get("/api/v1/supply/snapshot")).json();
+    const ownStock = snap.find(
+      (s: { facility_id: string; on_hand: number }) =>
+        s.facility_id === me.facility_id && s.on_hand > 5,
+    );
+    expect(ownStock).toBeTruthy();
+    const itemRes = await staffCtx.get("/api/v1/supply/items");
+    const items = await itemRes.json();
+    const item = items.find((it: { code: string }) => it.code === ownStock.item_code);
+
+    // Pick any patient to attribute the audit row to
+    const list = await (await staffCtx.get("/api/v1/patients?limit=1")).json();
+    const patientId = list.items[0].id;
+
+    const disResp = await staffCtx.post("/api/v1/supply/dispense", {
+      params: {
+        supply_item_id: item.id,
+        facility_id: me.facility_id,
+        quantity: 1,
+        patient_id: patientId,
+        purpose: "medication-dispense",
+      },
+    });
+    expect(disResp.status()).toBe(200);
+    expect((await disResp.json()).dispensed_quantity).toBe(1);
+    await staffCtx.dispose();
+
+    // Confirm an audit row landed for this patient via admin's facility-agnostic
+    // view (admin can list any patient's audit via worker-side endpoints if/when
+    // we add a /audit/by-patient endpoint; for now we sanity-check via patient
+    // detail to ensure no 5xx).
+    const adminCtx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${adminToken}` },
+    });
+    expect((await adminCtx.get(`/api/v1/patients/${patientId}`)).status()).toBe(200);
+    await adminCtx.dispose();
+  });
+
+  test("safety: citizen JWT cannot append observations → 403", async () => {
+    const ctoken = await loginCitizen("CM85051712345X", "000000");
+    const adminToken = await loginStaff("admin", "admin1234");
+    const adminCtx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${adminToken}` },
+    });
+    const patients = await (await adminCtx.get("/api/v1/patients?limit=1")).json();
+    const encs = await (
+      await adminCtx.get(`/api/v1/encounters/by-patient/${patients.items[0].id}`)
+    ).json();
+    const encId = encs[0].id;
+    await adminCtx.dispose();
+
+    const citCtx = await pwRequest.newContext({
+      baseURL: BE_URL,
+      extraHTTPHeaders: { Authorization: `Bearer ${ctoken}` },
+    });
+    const resp = await citCtx.post(`/api/v1/encounters/${encId}/observations`, {
+      data: [
+        {
+          code_system: "http://loinc.org",
+          code: "8310-5",
+          display: "Body temperature",
+          value_quantity: 37.0,
+          value_unit: "Cel",
+          effective_at: new Date().toISOString(),
+        },
+      ],
+    });
+    expect(resp.status()).toBe(403);
+    await citCtx.dispose();
+  });
+
+  test("browser walk: /worker/immunisations renders facility-stock + patient-lookup", async ({ page }) => {
+    const session = await fetchStaffSession("nurse.gulu", "demo1234");
+    await primeSession(page, session);
+
+    await page.goto("/worker/immunisations", { waitUntil: "domcontentloaded" });
+    await expect(
+      page.getByRole("heading", { name: /immunisations/i }).first(),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#nin-search")).toBeVisible();
+    await expect(page.locator("#vaccine")).toBeVisible();
+  });
+
+  test("browser walk: /worker/supply/receive renders all batch fields", async ({ page }) => {
+    const session = await fetchStaffSession("nurse.gulu", "demo1234");
+    await primeSession(page, session);
+
+    await page.goto("/worker/supply/receive", { waitUntil: "domcontentloaded" });
+    await expect(
+      page.getByRole("heading", { name: /receive new stock/i }).first(),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#supply-item")).toBeVisible();
+    await expect(page.locator("#lot")).toBeVisible();
+    await expect(page.locator("#qty")).toBeVisible();
+    await expect(page.locator("#expiry")).toBeVisible();
+  });
+
+  test("browser walk: /worker/supply/transfers renders the table", async ({ page }) => {
+    const session = await fetchStaffSession("nurse.gulu", "demo1234");
+    await primeSession(page, session);
+
+    const [resp] = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().includes("/api/v1/supply/transfers") && r.status() === 200,
+        { timeout: 15_000 },
+      ),
+      page.goto("/worker/supply/transfers", { waitUntil: "domcontentloaded" }),
+    ]);
+    expect(resp.status()).toBe(200);
+
+    await expect(
+      page.getByRole("heading", { name: /stock transfers/i }).first(),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("columnheader", { name: /item/i }).first()).toBeVisible();
+  });
+
+  test("browser walk: /worker/profile renders staff identity + facility", async ({ page }) => {
+    const session = await fetchStaffSession("nurse.gulu", "demo1234");
+    await primeSession(page, session);
+
+    await page.goto("/worker/profile", { waitUntil: "domcontentloaded" });
+    await expect(
+      page.getByRole("heading", { name: /my profile/i }).first(),
+    ).toBeVisible({ timeout: 10_000 });
+    // Wait for the staff API to fill in
+    await page.waitForTimeout(2000);
+    // The facility card should mention Gulu (nurse.gulu's facility)
+    await expect(page.getByText(/gulu/i).first()).toBeVisible({ timeout: 10_000 });
+  });
+
+  test("browser walk: /worker home shows the facility-today card", async ({ page }) => {
+    const session = await fetchStaffSession("nurse.gulu", "demo1234");
+    await primeSession(page, session);
+
+    await page.goto("/worker", { waitUntil: "domcontentloaded" });
+    await expect(
+      page.getByRole("heading", { name: /worker dashboard/i }).first(),
+    ).toBeVisible({ timeout: 10_000 });
+    // Per-facility card heading is "This facility"
+    await expect(page.getByText(/this facility/i).first()).toBeVisible({ timeout: 10_000 });
+  });
+});

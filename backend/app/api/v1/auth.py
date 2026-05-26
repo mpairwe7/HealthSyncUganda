@@ -173,6 +173,7 @@ async def seed_demo(
         await seed_run._seed_encounters(db, patients, facility_ids)
         await seed_run._seed_consents(db, patients, admin.id)
         await seed_run._seed_self_audit_reads(db, patients, facility_ids)
+        await seed_run._seed_transfers(db, facility_ids, items, admin.id)
         await db.flush()
     except Exception as exc:
         logger.exception("auth.seed_demo.failed", error=str(exc))

@@ -365,6 +365,70 @@ async def _seed_consents(s: AsyncSession, patient_ids: dict[str, str], admin_id:
         )
 
 
+async def _seed_transfers(
+    s: AsyncSession,
+    facility_ids: dict[str, str],
+    items: dict[str, str],
+    admin_id: str,
+) -> None:
+    """Emit ~6 historical StockTransfer rows so /worker/supply/transfers
+    has rows on first login.
+
+    The actual quantity movement is NOT replayed onto the ledger here
+    (that would double-count against `_seed_stock`). These are seed-only
+    records for the history list; the seeded `_seed_stock` quantities
+    are unchanged.
+
+    Idempotent: skip if any StockTransfer already exists.
+    """
+    from app.db.models.supply import StockTransfer
+
+    existing = (
+        await s.scalars(select(StockTransfer).limit(1))
+    ).first()
+    if existing is not None:
+        return
+
+    facility_list = list(facility_ids.values())
+    item_list = list(items.values())
+    if len(facility_list) < 2 or not item_list:
+        return
+
+    rnd = random.Random(23)
+    now = datetime.now(UTC)
+    reasons = [
+        "Top-up after stock-out alert",
+        "Cold-chain redistribution",
+        "Routine inter-facility balancing",
+        "Emergency response — outbreak readiness",
+        "Approaching-expiry redistribution",
+    ]
+
+    seeded = 0
+    while seeded < 6:
+        src, dst = rnd.sample(facility_list, 2)
+        item_id = rnd.choice(item_list)
+        qty = rnd.choice([50, 100, 200, 250, 500])
+        initiated_at = now - timedelta(days=rnd.randint(2, 75))
+        completed_at = initiated_at + timedelta(hours=rnd.randint(2, 36))
+        s.add(
+            StockTransfer(
+                from_facility_id=src,
+                to_facility_id=dst,
+                supply_item_id=item_id,
+                quantity=qty,
+                reason=rnd.choice(reasons),
+                status="completed",
+                initiated_by=admin_id,
+                initiated_at=initiated_at,
+                completed_at=completed_at,
+                created_at=initiated_at,
+                updated_at=completed_at,
+            )
+        )
+        seeded += 1
+
+
 async def _seed_self_audit_reads(
     s: AsyncSession,
     patient_ids: dict[str, str],
@@ -444,6 +508,7 @@ async def main() -> None:
             await _seed_encounters(s, patients, facility_ids)
             await _seed_consents(s, patients, admin.id)
             await _seed_self_audit_reads(s, patients, facility_ids)
+            await _seed_transfers(s, facility_ids, items, admin.id)
     logger.info(
         "seed.done",
         facilities=len(facility_ids),

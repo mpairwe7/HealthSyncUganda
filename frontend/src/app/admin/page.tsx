@@ -22,23 +22,26 @@ import {
   useImmunisationCoverage,
   useStockOutRisk,
 } from "@/lib/api/hooks";
-import { useAuth } from "@/lib/store/auth";
+import { OfflineBanner } from "@/components/ui/offline-banner";
+import { useAuth, useAuthHydrated } from "@/lib/store/auth";
 
 export default function AdminPage() {
   const session = useAuth((s) => s.session);
+  const hydrated = useAuthHydrated();
   const router = useRouter();
   useEffect(() => {
-    if (!session) router.replace("/login");
-  }, [session, router]);
+    if (hydrated && !session) router.replace("/login");
+  }, [hydrated, session, router]);
 
   const encByDistrict = useEncountersByDistrict(30);
   const immunisation = useImmunisationCoverage(180);
   const stockOuts = useStockOutRisk();
 
-  if (!session) return null;
+  if (!hydrated || !session) return null;
 
   return (
     <div className="space-y-6">
+      <OfflineBanner />
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Ministry & district view</h1>
         <p className="text-muted-foreground">
