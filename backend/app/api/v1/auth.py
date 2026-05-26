@@ -138,6 +138,7 @@ async def seed_demo(
 
     # Lazy import — seed module loads ~10 KB of demo data; skip if endpoint
     # isn't called.
+    from app.db.base import Base
     from app.db.models.facility import Facility
     from app.db.models.patient import Patient
     from app.seed import run as seed_run
@@ -145,6 +146,14 @@ async def seed_demo(
     logger.info("auth.seed_demo.start", env=settings.app_env)
 
     try:
+        # Ensure schema is up-to-date — creates any tables introduced by ORM
+        # changes that haven't been applied via Alembic yet. Idempotent
+        # (CREATE TABLE IF NOT EXISTS). This is the canonical "set up the
+        # DB" entrypoint for staging / pilot demos; production deployments
+        # should run `alembic upgrade head` instead.
+        conn = await db.connection()
+        await conn.run_sync(Base.metadata.create_all)
+
         # Use the request's session (get_db already commits on success,
         # rollbacks on exception). Run each seed step in sequence; they
         # all upsert idempotently.
