@@ -20,6 +20,12 @@ dependencies = [
     "asyncpg>=0.30.0",
     "aiosqlite>=0.20.0",          # fallback for laptop demos w/o postgres
     "alembic>=1.13.0",
+    # Sync Postgres driver — required by Alembic when running migrations
+    # against a Postgres database (Alembic itself is sync-only; asyncpg
+    # is async-only). Lives in main deps (not dev) because the production
+    # image runs `alembic upgrade head` from inside the lifespan hook
+    # when AUTO_MIGRATE=true (see app/main.py).
+    "psycopg[binary]>=3.2.0",
     # Cache / queue / idempotency
     "redis[hiredis]>=5.2.0",
     # Resilience
@@ -55,10 +61,6 @@ dev = [
     "ruff>=0.7.0",
     "mypy>=1.13.0",
     "freezegun>=1.5.0",
-    # Sync Postgres driver — required by Alembic when running migrations
-    # against a Postgres database (Alembic itself is sync-only; asyncpg
-    # is async-only). Only needed at migration time, not at app runtime.
-    "psycopg[binary]>=3.2.0",
 ]
 
 [tool.uv]
