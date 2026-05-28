@@ -117,15 +117,35 @@ jobs:
           # The cranecloud CLI reads its token via:
           #   keyring.get_password('cranecloud', 'token')
           # so writing ~/.cranecloud/token alone does nothing — the file is
-          # ignored by the CLI's get_token() helper (confirmed by reading
-          # cranecloud/utils/__init__.py on 2026-05-26). We have to put the
-          # secret INTO the file-backed keyring at the canonical path:
+          # ignored by the CLI's get_token() helper.
+          #
+          # We have to put the secret INTO the file-backed keyring at the
+          # canonical path:
           #   $XDG_DATA_HOME/python_keyring/keyring_pass.cfg
-          # Doing it via the keyring CLI on stdin avoids leaking the secret
-          # into argv / shell history.
+          #
+          # We can't use `keyring set` (the CLI) because in non-tty mode it
+          # calls getpass.getpass(), which on the GitHub runner raises
+          # EOFError instead of falling through to stdin (regression in
+          # keyring 25+; verified on the workflow runs 2026-05-26 → 28).
+          # Use the Python API directly — it bypasses the CLI's input
+          # handling entirely. Tokens flow via env vars, never argv, so
+          # they don't end up in `ps` / shell history / step logs.
           mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/python_keyring"
-          printf '%s' "${CRANECLOUD_TOKEN}"   | keyring set cranecloud token
-          printf '%s' "${CRANECLOUD_USER_ID}" | keyring set cranecloud user_id
+          python - <<'PY'
+          import os
+          import keyring
+          token   = os.environ["CRANECLOUD_TOKEN"]
+          user_id = os.environ["CRANECLOUD_USER_ID"]
+          if not token or not user_id:
+              raise SystemExit("Token or user_id is empty — check env scope secrets.")
+          keyring.set_password("cranecloud", "token", token)
+          keyring.set_password("cranecloud", "user_id", user_id)
+          # Round-trip read to catch backend-misconfig early (the null
+          # backend silently drops writes — surface that here rather than
+          # in the next step).
+          assert keyring.get_password("cranecloud", "token") == token, "token round-trip failed"
+          assert keyring.get_password("cranecloud", "user_id") == user_id, "user_id round-trip failed"
+          PY
 
           # The CLI also reads ~/.cranecloud/user_id directly for some
           # subcommands (`projects use-project` etc) — write that too as a
