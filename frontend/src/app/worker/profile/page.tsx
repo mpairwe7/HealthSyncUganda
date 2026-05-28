@@ -33,6 +33,11 @@ export default function WorkerProfilePage() {
   if (!hydrated || !session) return null;
 
   const expiresAt = new Date(session.expiresAt);
+  // Date.now() is an external clock — calling it during render is unavoidable
+  // here because the displayed "minutes left" must be a snapshot at render
+  // time. Page re-renders on session change, which is the only time this
+  // matters.
+  // eslint-disable-next-line react-hooks/purity
   const minutesLeft = Math.max(0, Math.round((session.expiresAt - Date.now()) / 60_000));
 
   return (

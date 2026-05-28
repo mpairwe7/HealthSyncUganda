@@ -1,5 +1,4 @@
 import type { Metadata, Viewport } from "next";
-import { Inter, JetBrains_Mono } from "next/font/google";
 
 import { Header } from "@/components/layout/header";
 import { Providers } from "@/components/layout/providers";
@@ -7,24 +6,10 @@ import { APP_NAME } from "@/lib/utils/env";
 
 import "./globals.css";
 
-/*
- * Inter and JetBrains Mono are downloaded at build time and served from the
- * Next.js asset pipeline — no runtime Google Fonts call, so the platform
- * works behind firewalls and on the rural offline scenario.
- */
-const inter = Inter({
-  subsets: ["latin", "latin-ext"],
-  variable: "--font-inter",
-  display: "swap",
-  weight: ["400", "500", "600", "700"],
-});
-
-const jetbrainsMono = JetBrains_Mono({
-  subsets: ["latin"],
-  variable: "--font-jetbrains-mono",
-  display: "swap",
-  weight: ["400", "500", "600"],
-});
+// System font stack (see globals.css `--font-sans` / `--font-mono`) — no
+// external font fetch, so the platform builds + runs behind firewalls and on
+// rural offline workstations. Visually equivalent to Inter on Windows /
+// Android / iOS where Segoe UI / Roboto / SF Pro ship system-wide.
 
 export const metadata: Metadata = {
   title: {
@@ -49,11 +34,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html
-      lang="en"
-      suppressHydrationWarning
-      className={`${inter.variable} ${jetbrainsMono.variable}`}
-    >
+    <html lang="en" suppressHydrationWarning>
       <body>
         <a
           href="#main-content"

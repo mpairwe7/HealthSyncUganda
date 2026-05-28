@@ -35,13 +35,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.log_level, json_output=settings.is_production)
     logger.info("startup", env=settings.app_env, version="0.1.0")
 
-    # Auto-create schema on startup if Alembic migrations are not (yet) wired up.
-    # `Base.metadata.create_all` is idempotent — it only creates tables that
-    # don't already exist; it never ALTERs existing tables. Safe to run on
-    # every startup; necessary for first-deploy on a fresh Postgres.
-    # Toggle via `AUTO_CREATE_SCHEMA=false` once Alembic is configured and
-    # migrations are applied out-of-band. See app/config.py for context.
+    # Auto-create schema bootstrap. Default-off in production: prod deploys
+    # must run `alembic upgrade head` explicitly so column-level changes
+    # (which create_all silently skips) reach Postgres. Dev/staging keep
+    # this on for first-deploy ergonomics. See app/config.py for context.
     if settings.auto_create_schema:
+        if settings.is_production:
+            logger.warning(
+                "schema.auto_create_in_production",
+                impact=(
+                    "AUTO_CREATE_SCHEMA=true in production hides migration "
+                    "drift — create_all skips ALTERs. Run `alembic upgrade "
+                    "head` and unset AUTO_CREATE_SCHEMA."
+                ),
+            )
         engine = get_engine()
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)

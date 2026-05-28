@@ -10,20 +10,22 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clinical.unepi_schedule import (
-    CODE_TO_ANTIGEN,
-    SNOMED_SYSTEM,
-    _ObsLite,
-    compute_immunisation_status,
+from app.clinical.immunisation_status import (
+    immunisation_status_for,
+    immunisation_status_for_many,
+)
+from app.core.access import (
+    can_read_patient,
+    patient_visibility_filter,
 )
 from app.core.audit import record_access
 from app.core.logging import get_logger
 from app.core.security import Principal, get_current_principal, require_role
 from app.db.models.caregiver import CaregiverLink
-from app.db.models.encounter import Observation
+from app.db.models.facility import Facility
 from app.db.models.patient import Patient
 from app.db.session import get_db
 from app.schemas.common import Page
@@ -42,36 +44,6 @@ from app.schemas.patient import (
 )
 
 router = APIRouter(prefix="/patients", tags=["patients"])
-
-
-async def _citizen_can_read(
-    principal: Principal, patient: Patient, db: AsyncSession
-) -> bool:
-    """A citizen JWT can read a patient record if:
-      1. it's their own record (patient.nin == principal.subject), or
-      2. they are a registered caregiver for that patient.
-
-    Workers and admins bypass this check (their RBAC scope is broader).
-    """
-    if principal.role != "citizen":
-        return True
-    if patient.nin == principal.subject:
-        return True
-    # Look up the citizen's own Patient row by NIN, then check the link table.
-    me = (
-        await db.scalars(select(Patient).where(Patient.nin == principal.subject))
-    ).one_or_none()
-    if me is None:
-        return False
-    link = (
-        await db.scalars(
-            select(CaregiverLink).where(
-                CaregiverLink.caregiver_id == me.id,
-                CaregiverLink.child_id == patient.id,
-            )
-        )
-    ).one_or_none()
-    return link is not None
 logger = get_logger(__name__)
 
 
@@ -119,6 +91,13 @@ async def search_patients(
     if district:
         stmt = stmt.where(Patient.district == district)
 
+    # RBAC scope: workers see their facility's patients (enrolled here OR with
+    # an encounter here); district_admins see their district; ministry_admins
+    # see everything.
+    scope_clauses = patient_visibility_filter(principal)
+    if scope_clauses:
+        stmt = stmt.where(and_(*scope_clauses))
+
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = (
         await db.scalars(
@@ -159,8 +138,7 @@ async def get_patient(
     if p is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Patient not found")
 
-    # Citizens can read their own record OR a record they are caregiver for
-    if not await _citizen_can_read(principal, p, db):
+    if not await can_read_patient(principal, p, db):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your record")
 
     await record_access(
@@ -194,6 +172,18 @@ async def create_patient(
             "Use PATCH /patients/{id} to update.",
         )
 
+    # Anchor the patient at the worker's facility so future RBAC checks have
+    # a definite enrolling-facility to scope against. Pulled from the
+    # principal — workers can't enrol someone at a facility they don't belong
+    # to. Higher roles enrol via /admin paths (not this endpoint).
+    enrolling_facility_id = principal.facility_id
+    enrolling_district = principal.district_id
+    if enrolling_district is None and enrolling_facility_id is not None:
+        # Best-effort lookup when the JWT predates the district claim.
+        fac = await db.get(Facility, enrolling_facility_id)
+        if fac is not None:
+            enrolling_district = fac.district
+
     p = Patient(
         nin=body.nin,
         given_name=body.given_name,
@@ -206,6 +196,8 @@ async def create_patient(
         sub_county=body.sub_county,
         parish=body.parish,
         village=body.village,
+        enrolling_facility_id=enrolling_facility_id,
+        enrolling_district=enrolling_district,
     )
     db.add(p)
     await db.flush()
@@ -232,6 +224,8 @@ async def update_patient(
     p = await db.get(Patient, patient_id)
     if p is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Patient not found")
+    if not await can_read_patient(principal, p, db):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your record")
 
     changes = body.model_dump(exclude_unset=True)
     for key, value in changes.items():
@@ -271,6 +265,8 @@ async def set_deceased(
     p = await db.get(Patient, patient_id)
     if p is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Patient not found")
+    if not await can_read_patient(principal, p, db):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your record")
 
     p.deceased = body.deceased
     p.record_version += 1
@@ -290,41 +286,6 @@ async def set_deceased(
 # ── Immunisation status (derived) ───────────────────────────────────────────
 
 
-async def _immunisation_status_for(
-    db: AsyncSession, patient: Patient
-) -> list[AntigenStatusOut]:
-    """Compute per-antigen status by joining the patient's vaccine
-    Observations against the UNEPI schedule. Used by both the per-patient
-    endpoint and the family-list endpoint (where we only need overdue
-    counts, not the full per-antigen breakdown)."""
-    rows = (
-        await db.scalars(
-            select(Observation).where(
-                Observation.patient_id == patient.id,
-                Observation.code_system == SNOMED_SYSTEM,
-                Observation.code.in_(list(CODE_TO_ANTIGEN.keys())),
-            )
-        )
-    ).all()
-    obs_lite = [_ObsLite(snomed_code=o.code, effective_at=o.effective_at) for o in rows]
-    statuses = compute_immunisation_status(patient.birth_date, obs_lite)
-    return [
-        AntigenStatusOut(
-            antigen=s.antigen,
-            display=s.display,
-            snomed_code=s.snomed_code,
-            series_size=s.series_size,
-            doses_given=s.doses_given,
-            next_dose_number=s.next_dose_number,
-            next_due_date=s.next_due_date,
-            overdue_days=s.overdue_days,
-            last_dose_at=s.last_dose_at,
-            status=s.status,  # type: ignore[arg-type]
-        )
-        for s in statuses
-    ]
-
-
 @router.get(
     "/{patient_id}/immunisation-status",
     response_model=list[AntigenStatusOut],
@@ -338,8 +299,7 @@ async def immunisation_status(
     p = await db.get(Patient, patient_id)
     if p is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Patient not found")
-    # Citizens may see their own record OR a child they're caregiver for.
-    if not await _citizen_can_read(principal, p, db):
+    if not await can_read_patient(principal, p, db):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your record")
 
     await record_access(
@@ -350,7 +310,7 @@ async def immunisation_status(
         action="read-immunisation-status",
         purpose="clinical-care",
     )
-    return await _immunisation_status_for(db, p)
+    return await immunisation_status_for(db, p)
 
 
 # ── Caregiver links / family graph ──────────────────────────────────────────
@@ -389,38 +349,53 @@ async def list_family(
     p = await db.get(Patient, patient_id)
     if p is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Patient not found")
-    if not await _citizen_can_read(principal, p, db):
+    if not await can_read_patient(principal, p, db):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your record")
 
     out: list[FamilyMemberOut] = []
 
     if direction in ("auto", "children"):
-        # patient is the caregiver → list children
-        rows = (
+        # patient is the caregiver → list children. Bulk-load: one query for
+        # the links, one for the child Patient rows, one for all child
+        # Observations (in immunisation_status_for_many). Total: 3 queries
+        # regardless of family size (was previously N+1 per child).
+        links = (
             await db.scalars(
                 select(CaregiverLink).where(CaregiverLink.caregiver_id == p.id)
             )
         ).all()
-        for link in rows:
-            child = await db.get(Patient, link.child_id)
-            if child is None:
-                continue
-            # Per-child overdue count — cheap because the schedule is in-memory
-            child_status = await _immunisation_status_for(db, child)
-            overdue = sum(1 for s in child_status if s.status == "overdue")
-            out.append(_to_family_member_out(link, child, overdue))
+        if links:
+            child_ids = [link.child_id for link in links]
+            children = (
+                await db.scalars(select(Patient).where(Patient.id.in_(child_ids)))
+            ).all()
+            by_id = {c.id: c for c in children}
+            statuses = await immunisation_status_for_many(db, list(children))
+            for link in links:
+                child = by_id.get(link.child_id)
+                if child is None:
+                    continue
+                child_status = statuses.get(child.id, [])
+                overdue = sum(1 for s in child_status if s.status == "overdue")
+                out.append(_to_family_member_out(link, child, overdue))
 
     if direction in ("auto", "caregivers"):
-        rows = (
+        links = (
             await db.scalars(
                 select(CaregiverLink).where(CaregiverLink.child_id == p.id)
             )
         ).all()
-        for link in rows:
-            adult = await db.get(Patient, link.caregiver_id)
-            if adult is None:
-                continue
-            out.append(_to_family_member_out(link, adult, 0))
+        if links:
+            adult_ids = [link.caregiver_id for link in links]
+            adults = (
+                await db.scalars(select(Patient).where(Patient.id.in_(adult_ids)))
+            ).all()
+            by_id = {a.id: a for a in adults}
+            for link in links:
+                adult = by_id.get(link.caregiver_id)
+                if adult is None:
+                    continue
+                out.append(_to_family_member_out(link, adult, 0))
 
     await record_access(
         db,

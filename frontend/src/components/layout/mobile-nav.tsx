@@ -39,8 +39,10 @@ export function MobileNav({ items }: Props) {
   const { t } = useT();
   const sheetId = useId();
 
-  // Close on route change.
+  // Close on route change. setState-in-effect is the documented pattern for
+  // reacting to pathname changes triggered outside React (Next.js router).
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setOpen(false);
   }, [pathname]);
 

@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.core.security import Principal, hash_password, issue_token, verify_password
+from app.db.models.facility import Facility
 from app.db.models.user import User
 from app.db.session import get_db
 from app.schemas.auth import CitizenLoginRequest, LoginRequest, TokenResponse
@@ -41,14 +42,29 @@ async def staff_login(
         # Constant-message reply prevents user-enumeration via timing
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
 
+    # Resolve the district at login time so it can be embedded as a JWT claim
+    # — avoids a per-request facility join when district_admins / workers hit
+    # district-scoped endpoints. Re-issued on next login if the user moves.
+    district_id: str | None = None
+    if user.facility_id:
+        facility = await db.get(Facility, user.facility_id)
+        if facility is not None:
+            district_id = facility.district
+
     principal = Principal(
         subject=user.id,
         role=user.role,  # type: ignore[arg-type]
         facility_id=user.facility_id,
+        district_id=district_id,
         name=user.full_name,
     )
     token = issue_token(principal, ttl=timedelta(hours=8))
-    logger.info("auth.staff_login", user_id=user.id, role=user.role)
+    logger.info(
+        "auth.staff_login",
+        user_id=user.id,
+        role=user.role,
+        district=district_id,
+    )
     return TokenResponse(
         access_token=token,
         expires_in=8 * 3600,
@@ -92,22 +108,6 @@ async def citizen_login(
         subject=body.nin,
         name=verification.full_name,
     )
-
-
-@router.post("/seed-admin", include_in_schema=False)
-async def seed_admin(db: Annotated[AsyncSession, Depends(get_db)]) -> dict[str, str]:
-    """Demo helper — creates an admin if none exists. Idempotent."""
-    existing = (await db.scalars(select(User).where(User.username == "admin"))).one_or_none()
-    if existing is None:
-        user = User(
-            username="admin",
-            full_name="Demo Administrator",
-            role="ministry_admin",
-            password_hash=hash_password("admin"),
-        )
-        db.add(user)
-        return {"created": "admin"}
-    return {"created": "noop"}
 
 
 @router.post("/seed-demo", include_in_schema=False)

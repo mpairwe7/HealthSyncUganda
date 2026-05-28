@@ -71,8 +71,12 @@ export const useAuth = create<State>()(
  */
 export function useAuthHydrated(): boolean {
   const [hydrated, setHydrated] = useState(false);
+  // setState in effect is the only way to bridge Zustand-persist's external
+  // hydration signal back into React state — there's no other affordance for
+  // subscribing to "session storage finished rehydrating".
   useEffect(() => {
     if (useAuth.persist.hasHydrated()) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setHydrated(true);
       return;
     }

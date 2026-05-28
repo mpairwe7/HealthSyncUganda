@@ -135,6 +135,7 @@ const config: Config = {
       },
     },
   },
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- Tailwind plugins ship as CJS; require is the documented loader pattern.
   plugins: [require("tailwindcss-animate")],
 };
 

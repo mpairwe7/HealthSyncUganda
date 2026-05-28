@@ -279,6 +279,17 @@ async def _seed_encounters(
             )
             s.add(enc)
             await s.flush()
+            # On the first iteration (earliest visit chronologically), anchor
+            # the patient at this facility so RBAC scoping has a definite
+            # home — mirrors the production behaviour where a new patient is
+            # enrolled at the facility that registers them.
+            if i == 0 and patient.enrolling_facility_id is None:
+                patient.enrolling_facility_id = facility_id
+                # Look up the district from the facility — denormalised
+                # mirror so district_admin scoping doesn't need a join.
+                fac = await s.get(Facility, facility_id)
+                if fac is not None:
+                    patient.enrolling_district = fac.district
 
             # Vitals: always temperature + blood pressure
             s.add(

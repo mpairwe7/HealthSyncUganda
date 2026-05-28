@@ -37,7 +37,7 @@ export default function CitizenFacilitiesPage() {
   }, [hydrated, session, router]);
 
   const facilities = useFacilities();
-  const allFacilities = facilities.data ?? [];
+  const allFacilities = useMemo(() => facilities.data ?? [], [facilities.data]);
 
   const districts = useMemo(
     () => Array.from(new Set(allFacilities.map((f) => f.district))).sort(),
@@ -95,7 +95,7 @@ export default function CitizenFacilitiesPage() {
             <CardTitle>Facilities ({filtered.length})</CardTitle>
           </div>
           <CardDescription>
-            Click "Directions" to open the location in OpenStreetMap.
+            Click &ldquo;Directions&rdquo; to open the location in OpenStreetMap.
           </CardDescription>
         </CardHeader>
         <CardContent>

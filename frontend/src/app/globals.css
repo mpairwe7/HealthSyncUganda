@@ -72,10 +72,10 @@
     --shadow-2: 0 4px 12px rgba(14, 20, 16, 0.08);
 
     /* ── Type ────────────────────────────────────────────────────────────── */
-    --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system,
-      "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular,
-      "JetBrains Mono", Menlo, monospace;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo,
+      "Cascadia Code", Consolas, monospace;
   }
 
   .dark,

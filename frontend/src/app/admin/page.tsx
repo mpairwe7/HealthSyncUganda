@@ -163,31 +163,65 @@ export default function AdminPage() {
             <ShieldCheck className="h-4 w-4 text-primary" /> Compliance posture
           </CardTitle>
           <CardDescription>
-            Updated continuously from the audit log and the resilience event stream.
+            Controls that are verified by code, not claimed by docs. Each row links
+            to the source of truth.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <ul className="grid gap-2 text-sm sm:grid-cols-2">
             <li className="flex items-center gap-2">
-              <Badge variant="success">OK</Badge> Audit log append-only — checked at startup
+              <Badge variant="success">OK</Badge>
+              Audit log append-only —{" "}
+              <span className="text-muted-foreground">
+                Postgres trigger blocks UPDATE/DELETE on{" "}
+                <code className="font-mono text-xs">audit_log</code>
+              </span>
             </li>
             <li className="flex items-center gap-2">
-              <Badge variant="success">OK</Badge> All PII access traced (purpose + consent)
+              <Badge variant="success">OK</Badge>
+              Every PII access carries{" "}
+              <code className="font-mono text-xs">purpose</code> +{" "}
+              <code className="font-mono text-xs">actor</code>
+              <span className="text-muted-foreground"> (record_access middleware)</span>
             </li>
             <li className="flex items-center gap-2">
-              <Badge variant="success">OK</Badge> TLS 1.2+ enforced at edge
+              <Badge variant="success">OK</Badge>
+              <span>
+                Offline replays carry a stable{" "}
+                <code className="font-mono text-xs">Idempotency-Key</code>;
+                server dedupes within 24h
+              </span>
             </li>
             <li className="flex items-center gap-2">
-              <Badge variant="success">OK</Badge> Idempotency keys honoured on offline replays
+              <Badge variant="success">OK</Badge>
+              <span>
+                Worker reads scoped to facility; district admins to district;
+                FHIR honours the same matrix
+              </span>
             </li>
             <li className="flex items-center gap-2">
-              <Badge variant="success">OK</Badge> Supply chain ledger chain-verified ·{" "}
-              {format(new Date(), "yyyy-MM-dd HH:mm")}
+              <Badge variant="success">OK</Badge>
+              <span>
+                Supply ledger hash-chained;{" "}
+                <code className="font-mono text-xs">stock_events</code> is
+                append-only at the DB
+              </span>
             </li>
             <li className="flex items-center gap-2">
-              <Badge variant="success">OK</Badge> DHIS2 backlog drained every minute
+              <Badge variant="outline">env</Badge>
+              <span className="text-muted-foreground">
+                TLS, CSP, HSTS enforced at the deployment edge (operator
+                responsibility)
+              </span>
             </li>
           </ul>
+          <p className="mt-3 text-xs text-muted-foreground">
+            Snapshot rendered at {format(new Date(), "yyyy-MM-dd HH:mm")}. The
+            backing tests live in{" "}
+            <code className="font-mono">backend/tests/test_rbac_scoping.py</code>{" "}
+            and{" "}
+            <code className="font-mono">test_fhir_endpoints.py</code>.
+          </p>
         </CardContent>
       </Card>
     </div>

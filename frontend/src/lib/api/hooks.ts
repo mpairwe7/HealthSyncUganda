@@ -42,7 +42,6 @@ import type {
   PaginatedPatients,
   PatientCreate,
   PatientOut,
-  PatientSummary,
   ProfileUpdate,
   ReceiveStockBody,
   StaffMeOut,

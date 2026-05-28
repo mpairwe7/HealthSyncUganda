@@ -14,9 +14,11 @@ COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# Install deps first (better layer caching)
-COPY pyproject.toml ./
-RUN uv sync --no-dev
+# Install deps first (better layer caching). Copy the lock file alongside
+# pyproject.toml and pass --locked so the build fails fast if the lock drifts
+# — reproducible builds are a hard requirement for government deployments.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --no-dev --locked
 
 COPY app ./app
 

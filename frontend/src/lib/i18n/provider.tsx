@@ -28,8 +28,11 @@ function readPreferred(): Locale {
 export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(DEFAULT_LOCALE);
 
-  // Hydration-safe: resolve preferred locale only on the client.
+  // Hydration-safe: resolve preferred locale only on the client. setState in
+  // effect is the canonical SSR-hydration pattern (server-render with
+  // DEFAULT_LOCALE; client transitions to user preference after mount).
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLocaleState(readPreferred());
   }, []);
 

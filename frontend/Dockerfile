@@ -1,7 +1,10 @@
 FROM oven/bun:1.1-alpine AS deps
 WORKDIR /app
-COPY package.json bun.lockb* ./
-RUN bun install --frozen-lockfile || bun install
+# Repo ships `bun.lock` (newer text format), not the legacy binary `bun.lockb`.
+# Use a glob that matches either, but enforce `--frozen-lockfile` with no
+# fallback — silent unlocked installs are a reproducibility hazard.
+COPY package.json bun.lock* ./
+RUN bun install --frozen-lockfile
 
 FROM oven/bun:1.1-alpine AS builder
 WORKDIR /app

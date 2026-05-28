@@ -88,7 +88,7 @@ export default function WorkerImmunisationsPage() {
 
   const search = usePatients({ q: ninQuery.length >= 3 ? ninQuery : undefined, page: 1 });
   const statusQ = useImmunisationStatus(selectedPatient?.id);
-  const status = statusQ.data ?? [];
+  const status = useMemo(() => statusQ.data ?? [], [statusQ.data]);
 
   const createEncounter = useCreateEncounter();
   const dispense = useDispense();
@@ -332,7 +332,7 @@ export default function WorkerImmunisationsPage() {
           <CardHeader>
             <CardTitle>Step 2 — Schedule status</CardTitle>
             <CardDescription>
-              Computed against the UNEPI routine schedule. Overdue rows highlighted; complete rows show what's done.
+              Computed against the UNEPI routine schedule. Overdue rows highlighted; complete rows show what&apos;s done.
             </CardDescription>
           </CardHeader>
           <CardContent>

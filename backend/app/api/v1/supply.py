@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import record_access
@@ -39,37 +39,54 @@ async def list_items(
     db: Annotated[AsyncSession, Depends(get_db)],
     _: Annotated[Principal, Depends(require_role("worker"))],
 ) -> list[SupplyItemOut]:
-    rows = (await db.scalars(select(SupplyItem).order_by(SupplyItem.name))).all()
-    out: list[SupplyItemOut] = []
-    for it in rows:
-        on_hand = (
-            await db.scalar(
-                select(func.coalesce(func.sum(StockBatch.remaining), 0)).where(
-                    StockBatch.supply_item_id == it.id
+    # Single GROUP BY query — was previously 1 + 2N (per-item aggregates).
+    # `COUNT(DISTINCT CASE WHEN remaining > 0 THEN facility_id END)` matches
+    # the original semantics: only facilities with positive stock count
+    # toward `facilities_stocked`.
+    stmt = (
+        select(
+            SupplyItem,
+            func.coalesce(func.sum(StockBatch.remaining), 0).label("on_hand"),
+            func.count(
+                func.distinct(
+                    case((StockBatch.remaining > 0, StockBatch.facility_id))
                 )
-            )
-        ) or 0
-        facility_count = (
-            await db.scalar(
-                select(func.count(func.distinct(StockBatch.facility_id))).where(
-                    StockBatch.supply_item_id == it.id, StockBatch.remaining > 0
-                )
-            )
-        ) or 0
-        out.append(
-            SupplyItemOut(
-                id=it.id,
-                code=it.code,
-                name=it.name,
-                category=it.category,  # type: ignore[arg-type]
-                unit=it.unit,
-                reorder_threshold=it.reorder_threshold,
-                requires_cold_chain=it.requires_cold_chain,
-                on_hand_total=int(on_hand),
-                facilities_stocked=int(facility_count),
-            )
+            ).label("facility_count"),
         )
-    return out
+        .outerjoin(StockBatch, StockBatch.supply_item_id == SupplyItem.id)
+        .group_by(SupplyItem.id)
+        .order_by(SupplyItem.name)
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        SupplyItemOut(
+            id=it.id,
+            code=it.code,
+            name=it.name,
+            category=it.category,  # type: ignore[arg-type]
+            unit=it.unit,
+            reorder_threshold=it.reorder_threshold,
+            requires_cold_chain=it.requires_cold_chain,
+            on_hand_total=int(on_hand or 0),
+            facilities_stocked=int(facility_count or 0),
+        )
+        for it, on_hand, facility_count in rows
+    ]
+
+
+def _enforce_facility_scope(principal: Principal, facility_id: str, action: str) -> None:
+    """Guard pharmacist operations to their own facility.
+
+    Higher roles (district_admin, ministry_admin) and facility-less
+    pharmacists (district-roving, if/when introduced) are allowed through —
+    they have wider operational scope by design.
+    """
+    if principal.role == "pharmacist" and principal.facility_id is not None:
+        if facility_id != principal.facility_id:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"Cannot {action} stock at a facility other than your assignment.",
+            )
 
 
 @router.post(
@@ -113,6 +130,7 @@ async def receive_batch(
     db: Annotated[AsyncSession, Depends(get_db)],
     principal: Annotated[Principal, Depends(require_role("pharmacist"))],
 ) -> StockBatchOut:
+    _enforce_facility_scope(principal, body.facility_id, "receive")
     if not await db.get(SupplyItem, body.supply_item_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Supply item not found")
     if not await db.get(Facility, body.facility_id):
@@ -166,7 +184,15 @@ async def initiate_transfer(
             "Source and destination facilities must differ.",
         )
 
-    # Drain source batches (FEFO)
+    # Sender perspective: the pharmacist must own the source facility.
+    # Higher roles (district/ministry) bypass — they coordinate transfers
+    # across facilities by design.
+    _enforce_facility_scope(principal, body.from_facility_id, "transfer from")
+
+    # Drain source batches (FEFO). `.with_for_update()` row-locks the source
+    # batches for the duration of this transaction so two concurrent
+    # transfers from the same facility can't oversell — mirrors the pattern
+    # in services/supply_ledger.py:dispense.
     batches = (
         await db.scalars(
             select(StockBatch)
@@ -176,6 +202,7 @@ async def initiate_transfer(
                 StockBatch.remaining > 0,
             )
             .order_by(StockBatch.expires_on.asc())
+            .with_for_update()
         )
     ).all()
     total_available = sum(b.remaining for b in batches)
@@ -345,6 +372,8 @@ async def dispense_endpoint(
     ),
 ) -> dict[str, str | int]:
     from app.services.supply_ledger import dispense as _dispense
+
+    _enforce_facility_scope(principal, facility_id, "dispense at")
 
     try:
         events = await _dispense(

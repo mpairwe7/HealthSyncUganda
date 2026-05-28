@@ -444,29 +444,35 @@ async def my_family(
         )
     ).all()
 
-    # Pre-import to avoid circulars when the patients router gets reused.
-    from app.api.v1.patients import _immunisation_status_for
+    from app.clinical.immunisation_status import immunisation_status_for_many
 
     out: list[FamilyMemberOut] = []
-    for link in links:
-        child = await db.get(Patient, link.child_id)
-        if child is None:
-            continue
-        child_status = await _immunisation_status_for(db, child)
-        overdue = sum(1 for s in child_status if s.status == "overdue")
-        out.append(
-            FamilyMemberOut(
-                link_id=link.id,
-                patient_id=child.id,
-                nin=child.nin,
-                given_name=child.given_name,
-                family_name=child.family_name,
-                birth_date=child.birth_date,
-                gender=child.gender,
-                relationship=link.relationship,
-                overdue_antigen_count=overdue,
+    if links:
+        child_ids = [link.child_id for link in links]
+        children = (
+            await db.scalars(select(Patient).where(Patient.id.in_(child_ids)))
+        ).all()
+        by_id = {c.id: c for c in children}
+        statuses = await immunisation_status_for_many(db, list(children))
+        for link in links:
+            child = by_id.get(link.child_id)
+            if child is None:
+                continue
+            child_status = statuses.get(child.id, [])
+            overdue = sum(1 for s in child_status if s.status == "overdue")
+            out.append(
+                FamilyMemberOut(
+                    link_id=link.id,
+                    patient_id=child.id,
+                    nin=child.nin,
+                    given_name=child.given_name,
+                    family_name=child.family_name,
+                    birth_date=child.birth_date,
+                    gender=child.gender,
+                    relationship=link.relationship,
+                    overdue_antigen_count=overdue,
+                )
             )
-        )
 
     await record_access(
         db,
