@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI
@@ -26,7 +27,89 @@ from app.middleware.audit_context import AuditContextMiddleware
 from app.middleware.idempotency import IdempotencyMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
 
+# Resolve at import time — keeps the async lifespan body off of any
+# pathlib calls (ASYNC240). `/app` in the Docker image; `backend/` locally.
+_BACKEND_ROOT = str(Path(__file__).resolve().parents[1])
+
 logger = get_logger(__name__)
+
+
+# Revisions used by the stamp-detection logic below.
+#   - _PRE_SWEEP_HEAD: state after the last revision *before* the compliance
+#     sweep. Any DB bootstrapped via create_all with the pre-sweep ORM
+#     matches this state.
+#   - _A01_HEAD: state after schema additions (enrolling_facility_id,
+#     enrolling_district, composite indexes). A DB bootstrapped via the
+#     post-sweep ORM via create_all matches this — the new columns exist
+#     but A02 backfill + A03 constraints/triggers haven't run.
+_PRE_SWEEP_HEAD = "c07e02b0024b"
+_A01_HEAD = "a01_patient_facility"
+
+
+async def _run_alembic_upgrade() -> None:
+    """Run `alembic upgrade head` from inside the application process.
+
+    Detects three bootstrap states and stamps appropriately:
+      1. Fresh DB → no tables → run all migrations from base.
+      2. Bootstrapped via create_all with PRE-sweep ORM → stamp pre-sweep
+         head, then A01+A02+A03 add the new columns and constraints.
+      3. Bootstrapped via create_all with POST-sweep ORM → new columns
+         already present → stamp A01, then A02 backfill + A03 constraints.
+
+    Idempotent: running against a DB already at head is a no-op.
+    """
+    from alembic.config import Config
+    from sqlalchemy import inspect
+
+    from alembic import command
+
+    engine = get_engine()
+
+    # Detect bootstrap state. Three signals:
+    #   has_alembic_version  — has alembic ever been run?
+    #   has_patients         — was the DB bootstrapped at all?
+    #   has_new_columns      — did the create_all use post-sweep ORM?
+    async with engine.connect() as conn:
+
+        def _inspect(sync_conn) -> dict:
+            insp = inspect(sync_conn)
+            has_av = insp.has_table("alembic_version")
+            has_pt = insp.has_table("patients")
+            has_new = False
+            if has_pt:
+                cols = {c["name"] for c in insp.get_columns("patients")}
+                has_new = "enrolling_facility_id" in cols
+            return {
+                "has_alembic_version": has_av,
+                "has_patients": has_pt,
+                "has_new_columns": has_new,
+            }
+
+        state = await conn.run_sync(_inspect)
+
+    # Alembic's command API is sync; the engine creation inside env.py reads
+    # DATABASE_URL from settings directly, so we just point Alembic at the
+    # backend's alembic.ini and let it do its thing.
+    alembic_cfg = Config(f"{_BACKEND_ROOT}/alembic.ini")
+    alembic_cfg.set_main_option("script_location", f"{_BACKEND_ROOT}/alembic")
+
+    def _do_migrate() -> None:
+        if not state["has_alembic_version"] and state["has_patients"]:
+            stamp_at = _A01_HEAD if state["has_new_columns"] else _PRE_SWEEP_HEAD
+            logger.info(
+                "schema.stamping_existing_db",
+                revision=stamp_at,
+                has_new_columns=state["has_new_columns"],
+            )
+            command.stamp(alembic_cfg, stamp_at)
+        command.upgrade(alembic_cfg, "head")
+
+    # alembic.command.upgrade is sync — run it in a thread so we don't
+    # block the event loop. The migration itself uses its own sync engine
+    # (see alembic/env.py) so this doesn't conflict with the app's engine.
+    import asyncio
+
+    await asyncio.to_thread(_do_migrate)
 
 
 @asynccontextmanager
@@ -53,6 +136,26 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("schema.create_all_complete", env=settings.app_env)
+
+    # Auto-migrate hook — for managed platforms (Crane Cloud, Fly, Render)
+    # where there's no separate migration step in the deploy pipeline.
+    # Idempotent: if the DB is at head, alembic exits cleanly. If the DB
+    # was bootstrapped via create_all (no `alembic_version` table), we
+    # stamp it at the last pre-sweep revision before upgrading so the
+    # already-applied DDL isn't re-run.
+    if settings.auto_migrate:
+        try:
+            await _run_alembic_upgrade()
+            logger.info("schema.alembic_upgrade_complete", env=settings.app_env)
+        except Exception as exc:
+            logger.error(
+                "schema.alembic_upgrade_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            # Re-raise so the pod doesn't serve traffic on a broken schema.
+            # Crane Cloud will surface the failure via the health check.
+            raise
 
     # Warm Redis. Service boots even if Redis is down (middlewares degrade
     # open), but several features lose fidelity — log loudly so the
