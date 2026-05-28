@@ -21,6 +21,11 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --no-dev --locked
 
 COPY app ./app
+# alembic.ini + the migrations directory are required by the AUTO_MIGRATE
+# lifespan hook in app/main.py — without these the container would crash on
+# startup when alembic tries to resolve its script_location.
+COPY alembic.ini ./alembic.ini
+COPY alembic ./alembic
 
 ENV PATH="/opt/venv/bin:${PATH}"
 
