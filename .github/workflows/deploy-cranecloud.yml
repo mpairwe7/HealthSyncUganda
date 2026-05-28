@@ -231,9 +231,15 @@ jobs:
           # detects pre-existing create_all-bootstrapped DBs and stamps
           # them at the appropriate revision before upgrading. Safe to keep
           # on across deploys (no-op when the DB is at head).
+          # AUTO_CREATE_SCHEMA must be FALSE on a managed-platform deploy:
+          # if it's left on alongside AUTO_MIGRATE, create_all races alembic
+          # and adds new columns before the migration runs, then A01 fails
+          # with DuplicateColumn. Explicit "=false" here overrides any
+          # historical env value that the cranecloud app accumulated.
           cranecloud apps update "$CRANECLOUD_BACKEND_APP_ID" \
             --image "$IMAGE" \
-            -e AUTO_MIGRATE=true
+            -e AUTO_MIGRATE=true \
+            -e AUTO_CREATE_SCHEMA=false
           # Grab the public URL for the health check + summary
           url=$(cranecloud apps info "$CRANECLOUD_BACKEND_APP_ID" 2>&1 | awk '/^Url/ {print $2}')
           echo "url=$url" >> "$GITHUB_OUTPUT"
