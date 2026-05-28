@@ -29,12 +29,25 @@ in the seed dataset, used as the read-self target for FHIR + REST tests).
 from __future__ import annotations
 
 import os
+import time
 import uuid
 
 import httpx
 import pytest
 
 STAGING_URL = os.getenv("STAGING_URL")
+
+# Readiness-probe tuning. The Crane Cloud ingress switches between old/new
+# pods during a rollout, producing intermittent 502/503s. A single 200 is
+# not enough to declare the pod stable — we want N consecutive 200s across
+# a short window so we don't poison the regression with transition errors.
+#
+# Defaults: 5 successful probes, 1.5s apart, max 5 minutes overall, after
+# which the suite fails the readiness check rather than running tests that
+# would all fail for the wrong reason.
+READINESS_CONSECUTIVE_OK = int(os.getenv("STAGING_READY_OK_PROBES", "5"))
+READINESS_PROBE_INTERVAL_S = float(os.getenv("STAGING_READY_INTERVAL_S", "1.5"))
+READINESS_MAX_WAIT_S = float(os.getenv("STAGING_READY_MAX_WAIT_S", "300"))
 
 pytestmark = pytest.mark.skipif(
     not STAGING_URL,
@@ -53,7 +66,46 @@ def client() -> httpx.Client:
         timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0),
         follow_redirects=False,
     ) as c:
+        _wait_until_stable(c)
         yield c
+
+
+def _wait_until_stable(client: httpx.Client) -> None:
+    """Block until the staging pod is reliably serving traffic.
+
+    Polls `/healthz` and requires `READINESS_CONSECUTIVE_OK` successive
+    200s before returning. A non-200 resets the counter — this catches the
+    rollout window where the ingress flickers between old + new pods and
+    one isolated 200 doesn't actually mean the new pod is ready.
+
+    Bounded by `READINESS_MAX_WAIT_S`; raises on timeout so the suite
+    surfaces "staging is degraded" rather than a flood of fake regressions.
+    """
+    deadline = time.monotonic() + READINESS_MAX_WAIT_S
+    ok_streak = 0
+    last_code: int | str = "n/a"
+    last_err: str | None = None
+    while time.monotonic() < deadline:
+        try:
+            res = client.get("/healthz", timeout=5.0)
+            last_code = res.status_code
+            if res.status_code == 200:
+                ok_streak += 1
+                if ok_streak >= READINESS_CONSECUTIVE_OK:
+                    return
+            else:
+                ok_streak = 0
+        except Exception as exc:
+            last_code = "exc"
+            last_err = f"{type(exc).__name__}: {exc}"
+            ok_streak = 0
+        time.sleep(READINESS_PROBE_INTERVAL_S)
+    raise RuntimeError(
+        f"staging not stable after {READINESS_MAX_WAIT_S:.0f}s — "
+        f"last /healthz status {last_code}"
+        + (f" ({last_err})" if last_err else "")
+        + f". Streak target was {READINESS_CONSECUTIVE_OK} consecutive 200s."
+    )
 
 
 def _staff_token(client: httpx.Client, username: str, password: str) -> str:
