@@ -30,11 +30,9 @@ from __future__ import annotations
 
 import os
 import uuid
-from typing import Any
 
 import httpx
 import pytest
-
 
 STAGING_URL = os.getenv("STAGING_URL")
 
@@ -652,9 +650,6 @@ def test_fhir_medication_dispense_bundle(
 def test_idempotency_replay_returns_cached_body(
     client: httpx.Client, tokens: dict[str, str]
 ) -> None:
-    nurse_facility_patients = client.get(
-        "/api/v1/patients?page_size=5", headers=_auth(tokens, "nurse")
-    ).json()["items"]
     # Stable test NIN derived from the run uuid so we don't collide with
     # other patients but stay deterministic within one run.
     test_nin = "CM" + uuid.uuid4().hex[:8].upper().ljust(11, "0") + "X"
