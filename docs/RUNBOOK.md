@@ -66,6 +66,7 @@ docker compose restart backend
 
 ## Procedures
 
+<a id="rb-01"></a>
 ### RB-01 — `/readyz` is red
 
 1. Read `/readyz` body. It enumerates which subsystem failed (`db`, `redis`).
@@ -75,6 +76,7 @@ docker compose restart backend
 
 Do not restart the backend container before confirming the root cause. A flapping `/readyz` is meaningful telemetry.
 
+<a id="rb-02"></a>
 ### RB-02 — Circuit breaker stuck open
 
 A breaker that does not transition `open → half_open` after the recovery window points at one of three causes.
@@ -90,6 +92,7 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
   https://api.healthsync.go.ug/api/v1/interop/circuits/dhis2/halfopen
 ```
 
+<a id="rb-03"></a>
 ### RB-03 — DHIS2 outbox not draining
 
 1. Check queue depth: `GET /api/v1/interop/circuits` — the `dhis2.outbox.depth` field.
@@ -104,6 +107,7 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 
 5. If draining a single message takes more than 30 s, suspect DHIS2 throttling; back off and retry with smaller batches.
 
+<a id="rb-04"></a>
 ### RB-04 — Patient search slow
 
 1. Confirm symptom in Grafana: `GET /api/v1/patients` p95 > 500 ms.
@@ -112,6 +116,7 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 4. If the pool is healthy but search is still slow, the cause is usually a missing index on a search field. Compare against the canonical indexes in `backend/app/db/models/patient.py`.
 5. Never `pg_terminate_backend` a query without paging the DBA. A long-running query may be a backup or a migration.
 
+<a id="rb-05"></a>
 ### RB-05 — Login rate-limit at unusual scale
 
 1. Identify the IP and route from the 429s: Grafana → Loki → `status=429 path=~"/auth/.*"`.
@@ -119,6 +124,7 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 3. If the IP is unknown and the pattern looks like credential stuffing, block at the WAF (NITA-U cloud) or the cloudflare layer.
 4. **Never** raise the citizen-login limit globally without a written request from MoH security. The 5/5min/NIN limit is the only thing preventing OTP enumeration on stolen NINs.
 
+<a id="rb-06"></a>
 ### RB-06 — Citizen reports a missing record
 
 This is the most common operational ticket. Do not edit the database to "restore" the record before doing this analysis.
@@ -129,6 +135,7 @@ This is the most common operational ticket. Do not edit the database to "restore
 4. If no `create` entry exists, the encounter was never persisted. Likely cause: offline-only mutation that never drained because the device was reset. Recoverable only from the device's IndexedDB queue — see RB-08.
 5. Document the finding in the ticket. Do not insert clinical data without a clinician's countersignature.
 
+<a id="rb-07"></a>
 ### RB-07 — Supply ledger verification failed
 
 The verification job runs nightly and on demand: `GET /api/v1/supply/ledger/verify`. If it returns `{"ok": false}`:
@@ -141,6 +148,7 @@ The verification job runs nightly and on demand: `GET /api/v1/supply/ledger/veri
 
 See ADR 0004 and DPIA §5.3 for the policy basis.
 
+<a id="rb-08"></a>
 ### RB-08 — Offline mutation queue not draining on a client device
 
 On the citizen / worker device:
@@ -150,6 +158,7 @@ On the citizen / worker device:
 3. If a single mutation is the head and has retried > 5 times, mark it `failed` (the UI offers a "discard" button after 5 attempts). Capture the payload before discarding — it goes to the lost-and-found bucket in the support log.
 4. Server-side: confirm the idempotency key the client thinks is still pending is not already accepted (`SELECT * FROM idempotency_keys WHERE key = '<ulid>';`).
 
+<a id="rb-09"></a>
 ### RB-09 — Backup did not run
 
 1. Check the cron logs (`/var/log/healthsync/backups.log`).
@@ -158,6 +167,7 @@ On the citizen / worker device:
 4. Trigger a manual backup: `scripts/backup-now.sh`. Confirm it landed in the configured object store with checksum.
 5. Investigate the cron failure separately. Common causes: storage quota, expired credentials, network policy change.
 
+<a id="rb-10"></a>
 ### RB-10 — Database failover required
 
 The pilot ships with a primary + one streaming replica. To promote:
@@ -168,6 +178,7 @@ The pilot ships with a primary + one streaming replica. To promote:
 4. Announce a brief read-only window during the failover. Citizens see a banner; staff see a maintenance toast.
 5. After promotion, immediately provision a new replica from the new primary. Do not run without a replica for more than 8 hours.
 
+<a id="rb-11"></a>
 ### RB-11 — TLS certificate expiring
 
 Pilot deployments use Let's Encrypt via ACME (cert-manager on Kubernetes, certbot on bare VM). Renewal is automatic; manual intervention is needed only if:
@@ -177,6 +188,7 @@ Pilot deployments use Let's Encrypt via ACME (cert-manager on Kubernetes, certbo
 
 Do not rotate cert manually unless the automated path is genuinely broken — every manual rotation is a foot-gun for the next on-call.
 
+<a id="rb-12"></a>
 ### RB-12 — Schema migration to apply
 
 Migrations are tested in staging first. To apply in production:
@@ -187,6 +199,7 @@ Migrations are tested in staging first. To apply in production:
 4. Apply: `cd backend && uv run alembic upgrade head`. Watch the logs.
 5. Smoke-test: `scripts/preflight.sh`. If it fails, rollback per the migration's down-script.
 
+<a id="rb-13"></a>
 ### RB-13 — Suspected PHI breach
 
 This procedure has the highest precedence. It supersedes all other runbook items.
@@ -200,7 +213,7 @@ This procedure has the highest precedence. It supersedes all other runbook items
 4. **Do not** "remediate" by deleting suspicious rows. Forensic preservation is more important than cosmetic cleanup.
 5. The DPO files the notification with PDPO and (where required) the affected citizens. Engineering supports.
 
-The detailed playbook is in [SECURITY.md](./SECURITY.md) §"Incident response".
+The detailed playbook — phases, classifications, evidence pack, PDPO notification template — is in [INCIDENT_RESPONSE.md](./INCIDENT_RESPONSE.md).
 
 ---
 

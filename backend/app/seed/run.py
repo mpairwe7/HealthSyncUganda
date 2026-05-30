@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import configure_logging, get_logger
 from app.core.security import hash_password
 from app.db.base import Base
+from app.db.models.caregiver import CaregiverLink
 from app.db.models.consent import Consent
 from app.db.models.encounter import Encounter, Observation
 from app.db.models.facility import Facility
@@ -26,7 +27,12 @@ from app.db.models.supply import StockBatch, SupplyItem
 from app.db.models.user import User
 from app.db.session import dispose_engine, get_engine, get_session_factory
 from app.seed.data import (
+    ANC_REASONS,
+    CHRONIC_REASONS,
+    DIAGNOSIS_BY_PERSONA,
     FACILITIES,
+    GENERAL_REASONS,
+    PAEDIATRIC_REASONS,
     PATIENTS,
     SUPPLY_ITEMS,
     USERS,
@@ -35,6 +41,27 @@ from app.seed.data import (
 from app.services.supply_ledger import receive_stock
 
 logger = get_logger(__name__)
+
+
+def _persona_for(birth_date: date, gender: str) -> str:
+    """Classify a patient for biased encounter generation."""
+    age_years = (date.today() - birth_date).days // 365
+    if age_years <= 5:
+        return "paediatric"
+    if age_years >= 50:
+        return "chronic"
+    if gender == "female" and 18 <= age_years <= 40:
+        return "anc"
+    return "general"
+
+
+def _reason_pool(persona: str) -> list[str]:
+    return {
+        "anc":        ANC_REASONS,
+        "paediatric": PAEDIATRIC_REASONS,
+        "chronic":    CHRONIC_REASONS,
+        "general":    GENERAL_REASONS,
+    }[persona]
 
 
 async def _ensure_schema() -> None:
@@ -126,18 +153,37 @@ async def _seed_patients(s: AsyncSession) -> dict[str, str]:
 async def _seed_stock(
     s: AsyncSession, facilities: dict[str, str], items: dict[str, str], admin_id: str
 ) -> None:
-    """Spread batches across facilities so the demo has interesting stock-out signals."""
+    """Spread batches across facilities so the demo has interesting stock-out signals.
+
+    Idempotent: skips (facility, item) pairs that already have any batch on
+    record. Allows re-runs without inflating stock to absurd levels.
+    """
     rnd = random.Random(42)
     today = date.today()
     for fac_code, fac_id in facilities.items():
         for item_code, item_id in items.items():
             # Skip vaccines at non-vaccine-ready HCs to mimic reality
-            if item_code.startswith("VAC-") and "HC4" in fac_code:
+            if item_code.startswith("VAC-") and ("HC2" in fac_code):
+                continue
+            # Idempotency: skip if any batch already exists for this pair
+            existing = (
+                await s.scalars(
+                    select(StockBatch).where(
+                        StockBatch.facility_id == fac_id,
+                        StockBatch.supply_item_id == item_id,
+                    ).limit(1)
+                )
+            ).first()
+            if existing is not None:
                 continue
             qty = rnd.randint(100, 4_000)
-            # Make Mbarara low on ACT-AL for the demo storyline
+            # Storyline: make Mbarara low on ACT-AL + critically low on PCV at Gulu
             if fac_code == "MBR-RRH-003" and item_code == "ACT-AL-001":
                 qty = 120
+            if fac_code == "GUL-RRH-002" and item_code == "VAC-PCV-001":
+                qty = 35   # below reorder_threshold of 60
+            if fac_code == "ARU-RRH-005" and item_code == "MED-AMOX-001":
+                qty = 480  # below reorder_threshold of 1000
             batch = StockBatch(
                 supply_item_id=item_id,
                 facility_id=fac_id,
@@ -156,34 +202,96 @@ async def _seed_stock(
 async def _seed_encounters(
     s: AsyncSession, patient_ids: dict[str, str], facility_ids: dict[str, str]
 ) -> None:
+    """Generate persona-aware encounter histories across the last 180 days.
+
+    Idempotent: a patient who already has any encounter on record is
+    skipped — this prevents re-running seed-demo from inflating the
+    history to unrealistic depths.
+
+    Each patient gets 3-7 encounters biased by clinical persona:
+      • ANC women     → quarterly antenatal visits + postnatal review
+      • Paediatric    → routine immunisations + acute episodes
+      • Chronic       → monthly follow-ups
+      • General       → 2-3 episodic OPD visits
+
+    Every encounter carries vitals (temperature, blood pressure) and
+    persona-appropriate diagnosis codes; ANC + paediatric encounters
+    also emit immunisation observations so the analytics charts have
+    real signal.
+    """
+    # Look up the seeded patients to determine persona for each
+    patients_by_id = {
+        p.id: p for p in (await s.scalars(select(Patient))).all()
+        if p.id in patient_ids.values()
+    }
+
     rnd = random.Random(7)
     facilities = list(facility_ids.values())
     now = datetime.now(UTC)
-    diagnosis_pool = ["B54", "A09.9", "J06.9", "E11.9", "O09.5"]  # ICD-10
+
     for _nin, pid in patient_ids.items():
-        for _ in range(rnd.randint(1, 3)):
-            started = now - timedelta(days=rnd.randint(1, 60), hours=rnd.randint(0, 23))
+        # Idempotency: skip patients that already have encounters
+        existing = (
+            await s.scalars(
+                select(Encounter).where(Encounter.patient_id == pid).limit(1)
+            )
+        ).first()
+        if existing is not None:
+            continue
+
+        patient = patients_by_id.get(pid)
+        if patient is None:
+            continue
+
+        persona = _persona_for(patient.birth_date, patient.gender)
+        reasons = _reason_pool(persona)
+        diagnoses = DIAGNOSIS_BY_PERSONA[persona]
+
+        # How many visits, spaced how?
+        if persona == "anc":
+            visit_count = 5    # ANC schedule
+            day_offsets = [180, 120, 60, 30, 7]
+        elif persona == "paediatric":
+            visit_count = rnd.randint(4, 7)
+            day_offsets = sorted(rnd.sample(range(2, 180), visit_count), reverse=True)
+        elif persona == "chronic":
+            visit_count = 6    # roughly monthly
+            day_offsets = [150, 120, 90, 60, 30, 10]
+        else:
+            visit_count = rnd.randint(2, 4)
+            day_offsets = sorted(rnd.sample(range(2, 180), visit_count), reverse=True)
+
+        for i, days_ago in enumerate(day_offsets[:visit_count]):
+            started = now - timedelta(days=days_ago, hours=rnd.randint(8, 16))
+            # ANC visits go to the nearest RRH; others rotate facilities
+            facility_id = rnd.choice(facilities)
             enc = Encounter(
                 patient_id=pid,
-                facility_id=rnd.choice(facilities),
-                reason=rnd.choice(
-                    [
-                        "Antenatal visit",
-                        "Outpatient consultation",
-                        "Vaccination",
-                        "Fever and chills",
-                        "Routine check-up",
-                    ]
+                facility_id=facility_id,
+                reason=(
+                    reasons[i] if persona == "anc" and i < len(reasons)
+                    else rnd.choice(reasons)
                 ),
                 started_at=started,
-                ended_at=started + timedelta(minutes=rnd.randint(15, 90)),
+                ended_at=started + timedelta(minutes=rnd.randint(15, 75)),
                 status="finished",
-                diagnosis_codes=[rnd.choice(diagnosis_pool)],
+                diagnosis_codes=[rnd.choice(diagnoses)],
             )
             s.add(enc)
             await s.flush()
+            # On the first iteration (earliest visit chronologically), anchor
+            # the patient at this facility so RBAC scoping has a definite
+            # home — mirrors the production behaviour where a new patient is
+            # enrolled at the facility that registers them.
+            if i == 0 and patient.enrolling_facility_id is None:
+                patient.enrolling_facility_id = facility_id
+                # Look up the district from the facility — denormalised
+                # mirror so district_admin scoping doesn't need a join.
+                fac = await s.get(Facility, facility_id)
+                if fac is not None:
+                    patient.enrolling_district = fac.district
 
-            # Add vitals + sometimes a vaccination observation
+            # Vitals: always temperature + blood pressure
             s.add(
                 Observation(
                     encounter_id=enc.id,
@@ -203,11 +311,34 @@ async def _seed_encounters(
                     code_system="http://loinc.org",
                     code="55284-4",
                     display="Blood pressure",
-                    value_string=f"{rnd.randint(95, 135)}/{rnd.randint(60, 90)}",
+                    value_string=f"{rnd.randint(95, 145)}/{rnd.randint(60, 95)}",
                     effective_at=enc.started_at,
                 )
             )
-            if rnd.random() < 0.4:
+            # Weight + height for paediatric growth monitoring
+            if persona == "paediatric":
+                age_yr = (started.date() - patient.birth_date).days / 365
+                s.add(
+                    Observation(
+                        encounter_id=enc.id,
+                        patient_id=pid,
+                        code_system="http://loinc.org",
+                        code="29463-7",
+                        display="Body weight",
+                        value_quantity=round(3.0 + age_yr * 2.2 + rnd.uniform(-0.5, 0.5), 1),
+                        value_unit="kg",
+                        effective_at=enc.started_at,
+                    )
+                )
+
+            # Immunisation: paediatric every visit; ANC ~50% (tetanus etc.); general 20%
+            roll = rnd.random()
+            should_immunise = (
+                persona == "paediatric"
+                or (persona == "anc" and roll < 0.5)
+                or (persona == "general" and roll < 0.2)
+            )
+            if should_immunise:
                 antigen = rnd.choice(list(VACCINE_CODES.keys()))
                 system, code, display = VACCINE_CODES[antigen]
                 s.add(
@@ -223,7 +354,18 @@ async def _seed_encounters(
 
 
 async def _seed_consents(s: AsyncSession, patient_ids: dict[str, str], admin_id: str) -> None:
+    """Grant a default cross-facility share consent to each patient.
+
+    Idempotent: patients who already have any consent record are skipped.
+    """
     for _, pid in patient_ids.items():
+        existing = (
+            await s.scalars(
+                select(Consent).where(Consent.patient_id == pid).limit(1)
+            )
+        ).first()
+        if existing is not None:
+            continue
         s.add(
             Consent(
                 patient_id=pid,
@@ -233,6 +375,178 @@ async def _seed_consents(s: AsyncSession, patient_ids: dict[str, str], admin_id:
                 granted_by=admin_id,
             )
         )
+
+
+async def _seed_transfers(
+    s: AsyncSession,
+    facility_ids: dict[str, str],
+    items: dict[str, str],
+    admin_id: str,
+) -> None:
+    """Emit ~6 historical StockTransfer rows so /worker/supply/transfers
+    has rows on first login.
+
+    The actual quantity movement is NOT replayed onto the ledger here
+    (that would double-count against `_seed_stock`). These are seed-only
+    records for the history list; the seeded `_seed_stock` quantities
+    are unchanged.
+
+    Idempotent: skip if any StockTransfer already exists.
+    """
+    from app.db.models.supply import StockTransfer
+
+    existing = (
+        await s.scalars(select(StockTransfer).limit(1))
+    ).first()
+    if existing is not None:
+        return
+
+    facility_list = list(facility_ids.values())
+    item_list = list(items.values())
+    if len(facility_list) < 2 or not item_list:
+        return
+
+    rnd = random.Random(23)
+    now = datetime.now(UTC)
+    reasons = [
+        "Top-up after stock-out alert",
+        "Cold-chain redistribution",
+        "Routine inter-facility balancing",
+        "Emergency response — outbreak readiness",
+        "Approaching-expiry redistribution",
+    ]
+
+    seeded = 0
+    while seeded < 6:
+        src, dst = rnd.sample(facility_list, 2)
+        item_id = rnd.choice(item_list)
+        qty = rnd.choice([50, 100, 200, 250, 500])
+        initiated_at = now - timedelta(days=rnd.randint(2, 75))
+        completed_at = initiated_at + timedelta(hours=rnd.randint(2, 36))
+        s.add(
+            StockTransfer(
+                from_facility_id=src,
+                to_facility_id=dst,
+                supply_item_id=item_id,
+                quantity=qty,
+                reason=rnd.choice(reasons),
+                status="completed",
+                initiated_by=admin_id,
+                initiated_at=initiated_at,
+                completed_at=completed_at,
+                created_at=initiated_at,
+                updated_at=completed_at,
+            )
+        )
+        seeded += 1
+
+
+async def _seed_caregivers(s: AsyncSession) -> None:
+    """Seed caregiver→child links for the demo family graphs.
+
+    Picks two adult ANC-age women already in the seed and pairs them with
+    two paediatric patients. The pairs are chosen for the showcase
+    narrative: a mother in Wakiso has two young children registered
+    across nearby districts, illustrating the cross-facility family
+    coordination story.
+
+    Idempotent: skip pairs that are already linked.
+    """
+    pairs = [
+        # (caregiver_nin, child_nin, relationship)
+        ("CF93081244778K", "CM23071955443Q", "mother"),  # Wakiso mother → Wakiso toddler
+        ("CF93081244778K", "CF24091344332R", "mother"),  # same mother → infant in Gulu
+        ("CF96112266889L", "CF22050466554P", "mother"),  # Gulu mother → Jinja toddler
+        ("CF94060533445M", "CM21030877665N", "guardian"),  # Lira aunt → Kampala child
+    ]
+
+    for caregiver_nin, child_nin, relationship in pairs:
+        caregiver = (
+            await s.scalars(select(Patient).where(Patient.nin == caregiver_nin))
+        ).one_or_none()
+        child = (
+            await s.scalars(select(Patient).where(Patient.nin == child_nin))
+        ).one_or_none()
+        if caregiver is None or child is None:
+            continue
+        existing = (
+            await s.scalars(
+                select(CaregiverLink).where(
+                    CaregiverLink.caregiver_id == caregiver.id,
+                    CaregiverLink.child_id == child.id,
+                )
+            )
+        ).one_or_none()
+        if existing is not None:
+            continue
+        s.add(
+            CaregiverLink(
+                caregiver_id=caregiver.id,
+                child_id=child.id,
+                relationship=relationship,
+            )
+        )
+
+
+async def _seed_self_audit_reads(
+    s: AsyncSession,
+    patient_ids: dict[str, str],
+    facility_ids: dict[str, str],
+) -> None:
+    """Insert synthetic prior worker reads into the audit log per patient.
+
+    The /api/v1/me/audit endpoint needs rows to display on first login so
+    citizens can see who has accessed their record. This generator inserts
+    3-5 plausibly-timed reads per patient across the last 60 days, mixing
+    actions ("read", "read-history") and purposes ("clinical-care",
+    "continuity-of-care") so the citizen-facing audit feed has variety.
+
+    Idempotent: a patient who already has any AuditLog row keyed by
+    (resource_type=Patient, resource_id=pid) is skipped — re-running
+    seed-demo never inflates the audit history.
+    """
+    from app.db.models.audit_log import AuditLog
+
+    rnd = random.Random(11)
+    now = datetime.now(UTC)
+    facility_list = list(facility_ids.values())
+    actions = [
+        ("read",         "clinical-care"),
+        ("read-history", "continuity-of-care"),
+        ("read",         "Triage at outpatient"),
+        ("read-history", "Pharmacy dispense look-up"),
+        ("read",         "ANC visit"),
+    ]
+
+    for _nin, pid in patient_ids.items():
+        existing = (
+            await s.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.resource_type == "Patient",
+                    AuditLog.resource_id == pid,
+                )
+                .limit(1)
+            )
+        ).first()
+        if existing is not None:
+            continue
+        for _ in range(rnd.randint(3, 5)):
+            action, purpose = rnd.choice(actions)
+            days_ago = rnd.randint(1, 60)
+            s.add(
+                AuditLog(
+                    actor_id=f"worker-seed-{rnd.randint(1000, 9999)}",
+                    actor_role="worker",
+                    actor_facility_id=rnd.choice(facility_list),
+                    resource_type="Patient",
+                    resource_id=pid,
+                    action=action,
+                    purpose=purpose,
+                    created_at=now - timedelta(days=days_ago, hours=rnd.randint(0, 23)),
+                    updated_at=now - timedelta(days=days_ago, hours=rnd.randint(0, 23)),
+                )
+            )
 
 
 async def main() -> None:
@@ -252,6 +566,9 @@ async def main() -> None:
             await _seed_stock(s, facility_ids, items, admin.id)
             await _seed_encounters(s, patients, facility_ids)
             await _seed_consents(s, patients, admin.id)
+            await _seed_self_audit_reads(s, patients, facility_ids)
+            await _seed_transfers(s, facility_ids, items, admin.id)
+            await _seed_caregivers(s)
     logger.info(
         "seed.done",
         facilities=len(facility_ids),

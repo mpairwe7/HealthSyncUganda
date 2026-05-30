@@ -12,7 +12,10 @@ const config: Config = {
   theme: {
     container: {
       center: true,
-      padding: { DEFAULT: "1rem", lg: "1.5rem" },
+      // 0.75rem (12px) on phones gives data-dense tables more room without
+      // letting text touch the viewport edge; 1rem/1.5rem at larger
+      // breakpoints stays comfortable.
+      padding: { DEFAULT: "0.75rem", sm: "1rem", lg: "1.5rem" },
       screens: { "2xl": "1280px" },
     },
     screens: {
@@ -132,6 +135,7 @@ const config: Config = {
       },
     },
   },
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- Tailwind plugins ship as CJS; require is the documented loader pattern.
   plugins: [require("tailwindcss-animate")],
 };
 

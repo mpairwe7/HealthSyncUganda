@@ -44,6 +44,7 @@ class Principal:
     subject: str                     # user-id (uuid) or NIN
     role: Role
     facility_id: str | None = None   # set for workers/pharmacists
+    district_id: str | None = None   # set for facility-bound staff & district_admin
     name: str | None = None
 
     def is_at_least(self, role: Role) -> bool:
@@ -65,6 +66,7 @@ def issue_token(principal: Principal, *, ttl: timedelta = timedelta(hours=8)) ->
         "sub": principal.subject,
         "role": principal.role,
         "facility_id": principal.facility_id,
+        "district_id": principal.district_id,
         "name": principal.name,
         "iat": int(now.timestamp()),
         "exp": int((now + ttl).timestamp()),
@@ -91,6 +93,7 @@ def _decode_token(token: str) -> Principal:
         subject=claims["sub"],
         role=claims["role"],
         facility_id=claims.get("facility_id"),
+        district_id=claims.get("district_id"),
         name=claims.get("name"),
     )
 

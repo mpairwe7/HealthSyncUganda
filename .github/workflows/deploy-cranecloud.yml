@@ -1,0 +1,465 @@
+name: Deploy to Crane Cloud
+
+# Operator-led rollout. Triggered:
+#   • manually   → workflow_dispatch with env + target + image_tag
+#   • by build   → build-push.yml fires this on main / v* tag success
+#
+# What this workflow does, end to end:
+#   1. Validate that all required env-scoped GitHub secrets exist (fail fast).
+#   2. Install the cranecloud CLI + the keyring backend it needs in a non-tty
+#      runner (keyrings.alt.file.PlaintextKeyring — null backend silently
+#      drops writes; experiments on 2026-05-26 confirmed).
+#   3. Seed ~/.cranecloud/token + user_id from the env secrets.
+#   4. Capture the CURRENT image tag for each target app — that's our
+#      rollback target if the new image fails its health check.
+#   5. Run `cranecloud apps update --image <new-image>` (no `docker.io/`
+#      prefix — cranecloud rejects it; experiments on 2026-05-26 confirmed).
+#   6. Wait for the app's public URL to return HTTP 200 on /healthz
+#      (backend) or / (frontend). Max 6 min total per app.
+#   7. If health check fails, AUTOMATICALLY roll back to the previously
+#      captured image tag and re-poll. Exit non-zero if rollback also fails.
+#   8. Write a structured summary to the run page (image tag, app URL,
+#      health-check result, rollback-or-not).
+#   9. On PR-triggered runs, post the URL as a PR comment.
+#  10. Always shred the on-disk token, even on failure.
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Target environment"
+        type: choice
+        options: [staging, pilot, production]
+        default: pilot
+        required: true
+      target:
+        description: "Which app(s) to update"
+        type: choice
+        options: [backend, frontend, both]
+        default: both
+        required: true
+      image_tag:
+        description: "Image tag to roll out (e.g. v0.1.0-pre-pilot.3 or sha-abc1234)"
+        type: string
+        required: true
+      pr_number:
+        description: "(internal) PR number to comment on after deploy"
+        type: string
+        required: false
+        default: ""
+
+concurrency:
+  group: deploy-cranecloud-${{ inputs.env }}
+  cancel-in-progress: false       # never cancel an in-flight production rollout
+
+permissions:
+  contents:      read
+  pull-requests: write   # post URL as PR comment when applicable
+
+jobs:
+  deploy:
+    name: cranecloud apps update (${{ inputs.env }})
+    runs-on: ubuntu-latest
+    # GitHub Environment gates approvals + holds environment-scoped secrets.
+    # Production is configured with required reviewers per ADR 0000 governance.
+    environment:
+      name: cranecloud-${{ inputs.env }}
+    env:
+      # File-backed keyring (the only backend that works in a non-tty runner;
+      # the null backend silently drops the token write and the next call
+      # reports "Please login first").
+      PYTHON_KEYRING_BACKEND: keyrings.alt.file.PlaintextKeyring
+      DOCKERHUB_USER: ${{ vars.DOCKERHUB_USER || 'mpairwe7' }}
+
+    steps:
+      - name: Checkout (for manifest reference + helper scripts)
+        uses: actions/checkout@v4
+
+      - name: Validate required environment-scoped secrets
+        run: |
+          set -euo pipefail
+          : "${CRANECLOUD_TOKEN:?CRANECLOUD_TOKEN environment secret is missing}"
+          : "${CRANECLOUD_USER_ID:?CRANECLOUD_USER_ID environment secret is missing}"
+          : "${CRANECLOUD_PROJECT_ID:?CRANECLOUD_PROJECT_ID environment secret is missing}"
+          if [[ "${{ inputs.target }}" != "frontend" ]]; then
+            : "${CRANECLOUD_BACKEND_APP_ID:?CRANECLOUD_BACKEND_APP_ID environment secret is missing}"
+          fi
+          if [[ "${{ inputs.target }}" != "backend" ]]; then
+            : "${CRANECLOUD_FRONTEND_APP_ID:?CRANECLOUD_FRONTEND_APP_ID environment secret is missing}"
+          fi
+        env:
+          CRANECLOUD_TOKEN: ${{ secrets.CRANECLOUD_TOKEN }}
+          CRANECLOUD_USER_ID: ${{ secrets.CRANECLOUD_USER_ID }}
+          CRANECLOUD_PROJECT_ID: ${{ secrets.CRANECLOUD_PROJECT_ID }}
+          CRANECLOUD_BACKEND_APP_ID: ${{ secrets.CRANECLOUD_BACKEND_APP_ID }}
+          CRANECLOUD_FRONTEND_APP_ID: ${{ secrets.CRANECLOUD_FRONTEND_APP_ID }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cranecloud CLI + keyrings.alt + keyring CLI
+        run: |
+          set -euo pipefail
+          pip install --upgrade pip
+          pip install cranecloud || pip install crane-cloud-cli
+          # The null keyring backend silently drops writes; the file backend
+          # in keyrings.alt is the only one that works in non-tty CI.
+          # `keyring` (the CLI) is needed to seed entries non-interactively.
+          pip install 'keyrings.alt' 'keyring'
+          which cranecloud keyring
+          cranecloud --help | head -5
+
+      - name: Seed cranecloud session into the keyring backend
+        run: |
+          set -euo pipefail
+          # The cranecloud CLI reads its token via:
+          #   keyring.get_password('cranecloud', 'token')
+          # so writing ~/.cranecloud/token alone does nothing — the file is
+          # ignored by the CLI's get_token() helper.
+          #
+          # We have to put the secret INTO the file-backed keyring at the
+          # canonical path:
+          #   $XDG_DATA_HOME/python_keyring/keyring_pass.cfg
+          #
+          # We can't use `keyring set` (the CLI) because in non-tty mode it
+          # calls getpass.getpass(), which on the GitHub runner raises
+          # EOFError instead of falling through to stdin (regression in
+          # keyring 25+; verified on the workflow runs 2026-05-26 → 28).
+          # Use the Python API directly — it bypasses the CLI's input
+          # handling entirely. Tokens flow via env vars, never argv, so
+          # they don't end up in `ps` / shell history / step logs.
+          mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/python_keyring"
+          python - <<'PY'
+          import os
+          import keyring
+          token   = os.environ["CRANECLOUD_TOKEN"]
+          user_id = os.environ["CRANECLOUD_USER_ID"]
+          if not token or not user_id:
+              raise SystemExit("Token or user_id is empty — check env scope secrets.")
+          keyring.set_password("cranecloud", "token", token)
+          keyring.set_password("cranecloud", "user_id", user_id)
+          # Round-trip read to catch backend-misconfig early (the null
+          # backend silently drops writes — surface that here rather than
+          # in the next step).
+          assert keyring.get_password("cranecloud", "token") == token, "token round-trip failed"
+          assert keyring.get_password("cranecloud", "user_id") == user_id, "user_id round-trip failed"
+          PY
+
+          # The CLI also reads ~/.cranecloud/user_id directly for some
+          # subcommands (`projects use-project` etc) — write that too as a
+          # belt-and-braces fallback.
+          mkdir -p ~/.cranecloud
+          umask 077
+          printf '%s' "${CRANECLOUD_USER_ID}" > ~/.cranecloud/user_id
+          chmod 600 ~/.cranecloud/user_id
+        env:
+          CRANECLOUD_TOKEN:   ${{ secrets.CRANECLOUD_TOKEN }}
+          CRANECLOUD_USER_ID: ${{ secrets.CRANECLOUD_USER_ID }}
+
+      - name: Verify CLI session
+        id: verify
+        run: |
+          set -euo pipefail
+          # Sanity-check the keyring entry without printing its value.
+          if ! keyring get cranecloud token >/dev/null 2>&1; then
+            echo "::error::keyring read failed — the seed step did not stash 'cranecloud:token'."
+            echo "### ❌ Keyring seed failed (Crane Cloud token not retrievable)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if ! cranecloud auth user >/tmp/auth.log 2>&1; then
+            {
+              echo "### ❌ Crane Cloud auth failed"
+              echo
+              echo "Token is in the keyring, but the API rejected it. Most likely cause:"
+              echo "the secret has expired or been rotated. Refresh CRANECLOUD_TOKEN in"
+              echo "the cranecloud-${{ inputs.env }} environment (Settings → Environments)."
+              echo
+              echo "CLI output:"
+              echo '```'
+              # Redact anything that looks like a bearer token in the log
+              sed -E 's/(token|bearer)=[^ ]+/\1=REDACTED/Ig' /tmp/auth.log
+              echo '```'
+              echo
+              echo "Fallback: deploy from an interactive shell."
+              echo
+              echo '```bash'
+              echo "cd infra/cranecloud"
+              echo "make update-${{ inputs.target }} ENV=${{ inputs.env }}"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            sed -E 's/(token|bearer)=[^ ]+/\1=REDACTED/Ig' /tmp/auth.log
+            exit 1
+          fi
+          # Extract the user's name into a step output (no secrets leaked)
+          name=$(grep -E "^Name" /tmp/auth.log | awk -F '  +' '{print $2}')
+          echo "actor=$name" >> "$GITHUB_OUTPUT"
+          echo "### ✅ Authenticated as $name" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Capture current image tags (for rollback)
+        id: previous
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.target }}" != "frontend" ]]; then
+            be_img=$(cranecloud apps info "$CRANECLOUD_BACKEND_APP_ID" 2>&1 | awk '/^Image/ {print $2}')
+            echo "backend=$be_img" >> "$GITHUB_OUTPUT"
+            echo "Captured backend rollback target: $be_img"
+          fi
+          if [[ "${{ inputs.target }}" != "backend" ]]; then
+            fe_img=$(cranecloud apps info "$CRANECLOUD_FRONTEND_APP_ID" 2>&1 | awk '/^Image/ {print $2}')
+            echo "frontend=$fe_img" >> "$GITHUB_OUTPUT"
+            echo "Captured frontend rollback target: $fe_img"
+          fi
+        env:
+          CRANECLOUD_BACKEND_APP_ID:  ${{ secrets.CRANECLOUD_BACKEND_APP_ID }}
+          CRANECLOUD_FRONTEND_APP_ID: ${{ secrets.CRANECLOUD_FRONTEND_APP_ID }}
+
+      - name: Update backend
+        id: update_backend
+        if: inputs.target == 'backend' || inputs.target == 'both'
+        env:
+          CRANECLOUD_BACKEND_APP_ID: ${{ secrets.CRANECLOUD_BACKEND_APP_ID }}
+          # Cranecloud rejects the `docker.io/` prefix — confirmed 2026-05-26.
+          IMAGE: ${{ env.DOCKERHUB_USER }}/healthsync-uganda-backend:${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          echo "→ Updating backend ($CRANECLOUD_BACKEND_APP_ID) to image: $IMAGE"
+          # AUTO_MIGRATE=true lets the backend run `alembic upgrade head`
+          # during lifespan startup — Crane Cloud has no separate migration
+          # step, so the application owns its own schema lifecycle. The hook
+          # detects pre-existing create_all-bootstrapped DBs and stamps
+          # them at the appropriate revision before upgrading. Safe to keep
+          # on across deploys (no-op when the DB is at head).
+          # AUTO_CREATE_SCHEMA must be FALSE on a managed-platform deploy:
+          # if it's left on alongside AUTO_MIGRATE, create_all races alembic
+          # and adds new columns before the migration runs, then A01 fails
+          # with DuplicateColumn. Explicit "=false" here overrides any
+          # historical env value that the cranecloud app accumulated.
+          cranecloud apps update "$CRANECLOUD_BACKEND_APP_ID" \
+            --image "$IMAGE" \
+            -e AUTO_MIGRATE=true \
+            -e AUTO_CREATE_SCHEMA=false
+          # Grab the public URL for the health check + summary
+          url=$(cranecloud apps info "$CRANECLOUD_BACKEND_APP_ID" 2>&1 | awk '/^Url/ {print $2}')
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Update frontend
+        id: update_frontend
+        if: inputs.target == 'frontend' || inputs.target == 'both'
+        env:
+          CRANECLOUD_FRONTEND_APP_ID: ${{ secrets.CRANECLOUD_FRONTEND_APP_ID }}
+          IMAGE: ${{ env.DOCKERHUB_USER }}/healthsync-uganda-frontend:${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          echo "→ Updating frontend ($CRANECLOUD_FRONTEND_APP_ID) to image: $IMAGE"
+          cranecloud apps update "$CRANECLOUD_FRONTEND_APP_ID" --image "$IMAGE"
+          url=$(cranecloud apps info "$CRANECLOUD_FRONTEND_APP_ID" 2>&1 | awk '/^Url/ {print $2}')
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Health check backend
+        id: health_backend
+        if: steps.update_backend.outcome == 'success'
+        env:
+          CRANECLOUD_BACKEND_APP_ID: ${{ secrets.CRANECLOUD_BACKEND_APP_ID }}
+          URL: ${{ steps.update_backend.outputs.url }}
+          ROLLBACK_IMAGE: ${{ steps.previous.outputs.backend }}
+        run: |
+          set -euo pipefail
+          echo "→ Polling $URL/healthz for up to 6 minutes"
+          # Require 5 consecutive 200s — Crane Cloud's ingress flickers
+          # between old + new pods during rollout, so a single 200 is not
+          # enough to declare success. A non-200 resets the streak.
+          ok=0
+          streak=0
+          STREAK_TARGET=5
+          for i in $(seq 1 36); do
+            code=$(curl -sk --max-time 8 -o /dev/null -w "%{http_code}" "$URL/healthz" || echo "000")
+            if [ "$code" = "200" ]; then
+              streak=$((streak+1))
+              echo "  [$i/36] HTTP 200 — streak $streak/$STREAK_TARGET"
+              if [ $streak -ge $STREAK_TARGET ]; then ok=1; break; fi
+            else
+              streak=0
+              echo "  [$i/36] HTTP $code — streak reset"
+            fi
+            sleep 10
+          done
+          if [ $ok -eq 1 ]; then
+            echo "rolled_back=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Backend healthy at $URL/healthz (after $STREAK_TARGET consecutive 200s)"
+          else
+            echo "::error::Backend /healthz did not reach 200 within 6 min — rolling back"
+            if [ -n "$ROLLBACK_IMAGE" ] && [ "$ROLLBACK_IMAGE" != "$IMAGE" ]; then
+              echo "→ Reverting backend to: $ROLLBACK_IMAGE"
+              cranecloud apps update "$CRANECLOUD_BACKEND_APP_ID" --image "$ROLLBACK_IMAGE"
+              echo "rolled_back=true" >> "$GITHUB_OUTPUT"
+              # Re-poll for the rollback to take effect
+              for i in $(seq 1 18); do
+                code=$(curl -sk --max-time 8 -o /dev/null -w "%{http_code}" "$URL/healthz" || echo "000")
+                [ "$code" = "200" ] && exit 1   # rolled back successfully, but original deploy failed
+                sleep 10
+              done
+            else
+              echo "rolled_back=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 1
+          fi
+
+      - name: Health check frontend
+        id: health_frontend
+        if: steps.update_frontend.outcome == 'success'
+        env:
+          CRANECLOUD_FRONTEND_APP_ID: ${{ secrets.CRANECLOUD_FRONTEND_APP_ID }}
+          URL: ${{ steps.update_frontend.outputs.url }}
+          ROLLBACK_IMAGE: ${{ steps.previous.outputs.frontend }}
+        run: |
+          set -euo pipefail
+          echo "→ Polling $URL/ for up to 6 minutes"
+          # Same streak-based stability check as the backend (see comment
+          # above) — guards against ingress flicker during pod rollover.
+          ok=0
+          streak=0
+          STREAK_TARGET=5
+          for i in $(seq 1 36); do
+            code=$(curl -sk --max-time 8 -o /dev/null -w "%{http_code}" "$URL/" || echo "000")
+            if [ "$code" = "200" ]; then
+              streak=$((streak+1))
+              echo "  [$i/36] HTTP 200 — streak $streak/$STREAK_TARGET"
+              if [ $streak -ge $STREAK_TARGET ]; then ok=1; break; fi
+            else
+              streak=0
+              echo "  [$i/36] HTTP $code — streak reset"
+            fi
+            sleep 10
+          done
+          if [ $ok -eq 1 ]; then
+            echo "rolled_back=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Frontend healthy at $URL (after $STREAK_TARGET consecutive 200s)"
+          else
+            echo "::error::Frontend / did not reach 200 within 6 min — rolling back"
+            if [ -n "$ROLLBACK_IMAGE" ]; then
+              echo "→ Reverting frontend to: $ROLLBACK_IMAGE"
+              cranecloud apps update "$CRANECLOUD_FRONTEND_APP_ID" --image "$ROLLBACK_IMAGE"
+              echo "rolled_back=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "rolled_back=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 1
+          fi
+
+      - name: Smoke-test FHIR + OpenAPI surface (backend only)
+        if: steps.health_backend.outcome == 'success'
+        env:
+          URL: ${{ steps.update_backend.outputs.url }}
+        run: |
+          set -euo pipefail
+          # Dump endpoints to files first; let python read from disk so we
+          # avoid the YAML-block / inline-python indentation hazard.
+          curl -sk "$URL/fhir/metadata" > /tmp/cs.json
+          curl -sk "$URL/openapi.json"  > /tmp/oa.json
+          python3 - <<'PY'
+          import json, sys
+          cs = json.load(open("/tmp/cs.json"))
+          oa = json.load(open("/tmp/oa.json"))
+          assert cs.get("resourceType") == "CapabilityStatement", f"resourceType={cs.get('resourceType')}"
+          assert cs.get("fhirVersion","").startswith("4"), f"fhirVersion={cs.get('fhirVersion')}"
+          print(f"  OK FHIR — fhirVersion={cs['fhirVersion']}, {len(cs.get('rest',[{}])[0].get('resource',[]))} resources")
+          assert oa.get("openapi","").startswith("3"), f"openapi={oa.get('openapi')}"
+          paths = list(oa.get("paths",{}))
+          assert any("/api/v1/" in p for p in paths), "no /api/v1/ paths"
+          print(f"  OK OpenAPI — openapi={oa['openapi']}, {len(paths)} paths, sample: {paths[:3]}")
+          PY
+          echo "→ Unauthenticated /api/v1/patients returns 401 (not 5xx)"
+          code=$(curl -sk -o /dev/null -w "%{http_code}" "$URL/api/v1/patients")
+          if [ "$code" != "401" ]; then
+            echo "::error::Expected 401 from /api/v1/patients, got $code"
+            exit 1
+          fi
+          echo "  OK — HTTP 401"
+
+      - name: Post-deploy summary
+        if: always()
+        env:
+          BE_URL: ${{ steps.update_backend.outputs.url }}
+          FE_URL: ${{ steps.update_frontend.outputs.url }}
+          BE_ROLLED_BACK: ${{ steps.health_backend.outputs.rolled_back }}
+          FE_ROLLED_BACK: ${{ steps.health_frontend.outputs.rolled_back }}
+          BE_PREV: ${{ steps.previous.outputs.backend }}
+          FE_PREV: ${{ steps.previous.outputs.frontend }}
+        run: |
+          {
+            echo "## Crane Cloud deploy — \`${{ inputs.env }}\`"
+            echo
+            echo "| Field             | Value |"
+            echo "| ----------------- | ----- |"
+            echo "| env               | \`${{ inputs.env }}\` |"
+            echo "| target            | \`${{ inputs.target }}\` |"
+            echo "| image_tag (new)   | \`${{ inputs.image_tag }}\` |"
+            echo "| job status        | \`${{ job.status }}\` |"
+            echo "| triggered by      | \`${{ github.actor }}\` |"
+            echo
+            if [ -n "$BE_URL" ]; then
+              echo "### Backend"
+              echo "- URL: <$BE_URL>"
+              echo "- Previous image (rollback target): \`$BE_PREV\`"
+              echo "- Rolled back: \`${BE_ROLLED_BACK:-n/a}\`"
+              echo "- Probes: <$BE_URL/healthz> · <$BE_URL/readyz> · <$BE_URL/fhir/metadata> · <$BE_URL/openapi.json> · <$BE_URL/docs>"
+              echo
+            fi
+            if [ -n "$FE_URL" ]; then
+              echo "### Frontend"
+              echo "- URL: <$FE_URL>"
+              echo "- Previous image (rollback target): \`$FE_PREV\`"
+              echo "- Rolled back: \`${FE_ROLLED_BACK:-n/a}\`"
+              echo
+            fi
+            if [ "${{ job.status }}" != "success" ]; then
+              echo "**Manual fallback** (interactive shell):"
+              echo '```bash'
+              echo "cd infra/cranecloud"
+              echo "make update-${{ inputs.target == 'both' && 'backend && make update-frontend' || inputs.target }} ENV=${{ inputs.env }}"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: PR comment (when applicable)
+        if: inputs.pr_number != '' && job.status == 'success'
+        uses: actions/github-script@v7
+        env:
+          BE_URL: ${{ steps.update_backend.outputs.url }}
+          FE_URL: ${{ steps.update_frontend.outputs.url }}
+        with:
+          script: |
+            const pr = parseInt('${{ inputs.pr_number }}', 10);
+            const env = '${{ inputs.env }}';
+            const beUrl = process.env.BE_URL;
+            const feUrl = process.env.FE_URL;
+            const lines = [
+              `### 🚀 Deployed to Crane Cloud \`${env}\``,
+              ``,
+              beUrl ? `- Backend: <${beUrl}>` : null,
+              beUrl ? `  - [/healthz](${beUrl}/healthz) · [/readyz](${beUrl}/readyz) · [/fhir/metadata](${beUrl}/fhir/metadata) · [/openapi.json](${beUrl}/openapi.json) · [/docs](${beUrl}/docs)` : null,
+              feUrl ? `- Frontend: <${feUrl}>` : null,
+              ``,
+              `Image tag: \`${{ inputs.image_tag }}\``,
+            ].filter(Boolean).join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: pr,
+              body: lines,
+            });
+
+      - name: Cleanup token
+        if: always()
+        run: |
+          # Clear both the legacy on-disk paths AND the keyring backend that
+          # the CLI actually reads from. `keyring del` returns non-zero if
+          # the entry doesn't exist — that's fine on a clean run.
+          keyring del cranecloud token 2>/dev/null || true
+          keyring del cranecloud user_id 2>/dev/null || true
+          KR="${XDG_DATA_HOME:-$HOME/.local/share}/python_keyring/keyring_pass.cfg"
+          shred -uz "$KR" 2>/dev/null || rm -f "$KR"
+          shred -uz ~/.cranecloud/token   2>/dev/null || rm -f ~/.cranecloud/token
+          shred -uz ~/.cranecloud/user_id 2>/dev/null || rm -f ~/.cranecloud/user_id

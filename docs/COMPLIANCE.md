@@ -21,14 +21,14 @@ This document maps every relevant section of Uganda's *Data Protection and Priva
 | s.14 | Accountability | Every access logged with actor + purpose + consent_id | `app/core/audit.py:record_access` |
 | s.17 | Security measures | Defense-in-depth: TLS, HSTS, rate-limit, RBAC, audit, idempotency, circuit-breakers | `docs/SECURITY.md` |
 | s.18 | Retention | Documented + technical (cache TTLs + lifecycle policies on Postgres / Redis) | `docs/DPIA.md §9` |
-| s.19 | Notification of breach | Breach playbook + 72-hour PDPO notification SLA | `docs/INCIDENT_RESPONSE.md` (operational, post-pilot) |
+| s.19 | Notification of breach | Breach playbook + 72-hour PDPO notification SLA | [`docs/INCIDENT_RESPONSE.md`](./INCIDENT_RESPONSE.md) — IR-30 notification template, IR-20…IR-25 incident classes |
 | s.20 | Data Protection Officer (DPO) | MoH-appointed DPO; contact details published in citizen portal | Operational |
 | s.21 | Sub-processor management | NITA-U + NIRA only by default; cross-border requires PDPO adequacy | `docs/DPIA.md §6, §8` |
 | s.22 | Consent | Explicit, granular, revocable; child-guardian flagged | `app/db/models/consent.py` |
 | s.24 | Right of access | Citizen portal `/citizen/records`; FHIR `Patient/{id}` self-read | `frontend/src/app/citizen/records/page.tsx` |
 | s.25 | Right to rectification | Worker-mediated correction with audit | `app/api/v1/patients.py:update_patient` |
 | s.26 | Right to erasure | Soft-delete + physical erasure gated by ministry-admin role; cascade to caches | Roadmapped — control gate exists, physical-erase script in `scripts/forget.sh` (Q3 2026) |
-| s.27 | Right to object / withdraw consent | `/api/v1/consents/{id}/revoke`; cache invalidation within 60 s | `app/api/v1/consent.py:revoke` |
+| s.27 | Right to object / withdraw consent | `/api/v1/consents/{id}/revoke` records the withdrawal AND `app/core/access.py:has_active_consent_for_worker` enforces it at the access layer — a worker/pharmacist read returns 403 once all of the patient's consents are revoked or expired. | `app/api/v1/consent.py:revoke`, `app/core/access.py` (see [ACCESS_CONTROL.md §3.1](./ACCESS_CONTROL.md#31-worker--pharmacist-consent-enforcement)) |
 | s.29 | Cross-border transfer | None in default; controlled in roadmap | `docs/DPIA.md §8` |
 | s.30 | Processing of special-category data | Highest-sensitivity clinical fields scoped for field-level encryption | `docs/DPIA.md §5 R10` |
 | s.31 | Statistical / research use | Analytics endpoints emit aggregates only; no row-level export | `app/api/v1/analytics.py` returns counts/sums only |
@@ -63,7 +63,7 @@ This document maps every relevant section of Uganda's *Data Protection and Priva
 | TLS 1.2+ | Enforced at edge |
 | Centralised logging (NITA-U SIEM compatible) | JSON-structured logs ship to any SIEM (Loki, Splunk, Elastic, Wazuh) |
 | Vulnerability management | `bandit` (Python), `bun audit` (JS) wired into `make lint`; quarterly external scan planned |
-| Incident reporting (CERT-UG) | 24-hour playbook in `docs/INCIDENT_RESPONSE.md` (post-pilot) |
+| Incident reporting (CERT-UG) | 24-hour notification path in [`docs/INCIDENT_RESPONSE.md`](./INCIDENT_RESPONSE.md) §6 communication tree |
 
 ## E. Independent verifications scheduled before pilot
 

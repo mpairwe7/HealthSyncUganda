@@ -11,6 +11,7 @@ from app.api.v1 import (
     encounters,
     facilities,
     interop,
+    me,
     patients,
     supply,
 )
@@ -25,3 +26,4 @@ api_v1_router.include_router(facilities.router)
 api_v1_router.include_router(supply.router)
 api_v1_router.include_router(analytics.router)
 api_v1_router.include_router(interop.router)
+api_v1_router.include_router(me.router)

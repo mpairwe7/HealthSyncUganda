@@ -21,23 +21,27 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { useEncountersByPatient, usePatients } from "@/lib/api/hooks";
-import { useAuth } from "@/lib/store/auth";
+import { useMe, useMyEncounters } from "@/lib/api/hooks";
+import { useAuth, useAuthHydrated } from "@/lib/store/auth";
+import { useUi } from "@/lib/store/ui";
 
 export default function CitizenRecordsPage() {
   const session = useAuth((s) => s.session);
+  const hydrated = useAuthHydrated();
   const router = useRouter();
+  const online = useUi((s) => s.online);
 
   useEffect(() => {
-    if (!session) router.replace("/citizen/login");
-  }, [session, router]);
+    if (hydrated && !session) router.replace("/citizen/login");
+  }, [hydrated, session, router]);
 
-  // Citizens log in with their NIN — we look up their patient record by NIN.
-  const search = usePatients({ q: session?.subject, page: 1 });
-  const patient = search.data?.items[0];
-  const encounters = useEncountersByPatient(patient?.id);
+  // /me resolves the calling citizen's Patient via NIN; /me/encounters returns
+  // the full history without needing a patient_id round-trip.
+  const search = useMe(!!session);
+  const patient = search.data;
+  const encounters = useMyEncounters(!!session);
 
-  if (!session) return null;
+  if (!hydrated || !session) return null;
 
   return (
     <div className="space-y-6">
@@ -47,6 +51,12 @@ export default function CitizenRecordsPage() {
           Read-only view across every facility you&apos;ve visited.
         </p>
       </div>
+
+      {!online && (
+        <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          Offline — showing the last synced copy of your record.
+        </div>
+      )}
 
       <Card>
         <CardHeader>

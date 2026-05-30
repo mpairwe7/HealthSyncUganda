@@ -73,3 +73,15 @@ class PatientSummary(BaseModel):
     gender: Gender
     birth_date: date
     district: str
+
+
+class PatientDeceased(BaseModel):
+    """Body for `PATCH /patients/{id}/deceased` — reversible vital-status flag."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+    deceased: bool
+    purpose: str | None = Field(
+        default=None,
+        max_length=300,
+        description="Reason for the update (e.g. 'Death certificate filed', 'Erroneous flag').",
+    )

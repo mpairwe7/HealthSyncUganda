@@ -5,8 +5,16 @@ export const Table = React.forwardRef<
   HTMLTableElement,
   React.HTMLAttributes<HTMLTableElement>
 >(({ className, ...props }, ref) => (
-  <div className="relative w-full overflow-auto">
-    <table ref={ref} className={cn("w-full caption-bottom text-sm", className)} {...props} />
+  // `-mx-2 sm:mx-0` lets the table extend to the edge of the viewport on
+  // phones (the page already has its own padding), giving an extra ~16px
+  // of horizontal real estate per row. `overflow-x-auto` triggers
+  // horizontal scrolling when the table is wider than the wrapper.
+  <div className="relative -mx-2 w-[calc(100%+1rem)] overflow-x-auto sm:mx-0 sm:w-full">
+    <table
+      ref={ref}
+      className={cn("w-full min-w-[640px] caption-bottom text-sm sm:min-w-full", className)}
+      {...props}
+    />
   </div>
 ));
 Table.displayName = "Table";
@@ -49,7 +57,7 @@ export const TableHead = React.forwardRef<
   <th
     ref={ref}
     className={cn(
-      "h-10 px-3 text-left align-middle font-medium text-muted-foreground",
+      "h-10 whitespace-nowrap px-3 text-left align-middle font-medium text-muted-foreground",
       className,
     )}
     {...props}
