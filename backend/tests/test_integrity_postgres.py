@@ -27,16 +27,13 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models.facility import Facility
-from app.db.models.supply import StockBatch, StockTransfer, SupplyItem
-from app.services.supply_ledger import append_event
+from app.db.models.supply import StockBatch
 
 POSTGRES_URL = os.getenv("TEST_POSTGRES_URL")
 

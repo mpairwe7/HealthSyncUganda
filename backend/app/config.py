@@ -52,6 +52,15 @@ class Settings(BaseSettings):
     # — main.py logs a WARNING at startup if it observes that combination.
     auto_create_schema: bool = False
 
+    # Run `alembic upgrade head` on startup. Necessary on platforms (e.g.
+    # Crane Cloud) where there's no separate migration step in the deploy
+    # pipeline. The lifespan hook detects a DB bootstrapped via create_all
+    # (no `alembic_version` table) and stamps it at the last pre-Alembic
+    # revision before upgrading, so this is safe to enable on existing
+    # staging databases. Defaults False; staging / pilot turn it on
+    # through cranecloud env vars.
+    auto_migrate: bool = False
+
     # ── Redis ────────────────────────────────────────────────────────────
     redis_url: str = "redis://localhost:6379/0"
 
