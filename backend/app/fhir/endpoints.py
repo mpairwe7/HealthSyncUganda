@@ -586,7 +586,13 @@ async def create_observation(
 
     effective = body.get("effectiveDateTime")
     if effective:
-        effective_at = datetime.fromisoformat(effective.replace("Z", "+00:00"))
+        try:
+            effective_at = datetime.fromisoformat(str(effective).replace("Z", "+00:00"))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Invalid effectiveDateTime — expected ISO-8601.",
+            ) from exc
     else:
         effective_at = datetime.now(UTC)
 
