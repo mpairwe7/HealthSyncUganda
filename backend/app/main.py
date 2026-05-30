@@ -112,11 +112,49 @@ async def _run_alembic_upgrade() -> None:
     await asyncio.to_thread(_do_migrate)
 
 
+_PLACEHOLDER_MARKER = "change-me"
+
+
+def _check_production_secrets(settings: Settings) -> None:
+    """Refuse to boot a non-local deployment that still uses placeholder secrets.
+
+    A staging/production instance running with the default SECRET_KEY signs JWTs
+    with a value committed to the source tree — anyone could forge a
+    ministry_admin token. Fail fast rather than serve forgeable credentials.
+    Development/test envs are exempt so the demo stays friction-free.
+    """
+    if settings.app_env not in ("staging", "production"):
+        return
+    secret = settings.secret_key.get_secret_value()
+    if _PLACEHOLDER_MARKER in secret.lower() or len(secret) < 32:
+        raise RuntimeError(
+            "SECRET_KEY is unset, a placeholder, or shorter than 32 bytes while "
+            f"APP_ENV={settings.app_env}. Generate one with `openssl rand -hex 32` "
+            "and set it before starting."
+        )
+    if (
+        settings.nira_api_key.get_secret_value() == "mock-nira-key"
+        or settings.dhis2_password.get_secret_value() == "mock"
+    ):
+        logger.warning(
+            "integration.mock_credentials",
+            impact=(
+                f"NIRA/DHIS2 still use mock credentials with APP_ENV="
+                f"{settings.app_env}. Real integrations will not work until these "
+                "are overridden."
+            ),
+        )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level, json_output=settings.is_production)
     logger.info("startup", env=settings.app_env, version="0.1.0")
+
+    # Fail fast if a non-local deployment is still on placeholder secrets —
+    # forgeable JWTs are worse than a failed boot.
+    _check_production_secrets(settings)
 
     # Auto-create schema bootstrap. Default-off in production: prod deploys
     # must run `alembic upgrade head` explicitly so column-level changes
@@ -210,8 +248,8 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.cors_allow_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
     )
     app.add_middleware(AuditContextMiddleware)
     app.add_middleware(IdempotencyMiddleware)
