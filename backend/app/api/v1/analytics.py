@@ -61,10 +61,13 @@ class DistrictEncounterCount(BaseModel):
 )
 async def encounters_by_district(
     db: Annotated[AsyncSession, Depends(get_db)],
-    _: Annotated[Principal, Depends(require_role("district_admin"))],
+    principal: Annotated[Principal, Depends(require_role("district_admin"))],
     since_days: int = Query(30, ge=1, le=365),
 ) -> list[DistrictEncounterCount]:
-    cache_key = f"analytics:enc-by-district:{since_days}"
+    # District admins see only their district's row; ministry_admins see all.
+    # Cache key includes the principal scope so two roles don't share results.
+    scope = principal.district_id if principal.role == "district_admin" else "all"
+    cache_key = f"analytics:enc-by-district:{since_days}:{scope}"
 
     async def build() -> list[dict]:
         cutoff = datetime.now(UTC) - timedelta(days=since_days)
@@ -79,6 +82,8 @@ async def encounters_by_district(
             .group_by(Patient.district)
             .order_by(func.count(Encounter.id).desc())
         )
+        if principal.role == "district_admin" and principal.district_id:
+            stmt = stmt.where(Patient.district == principal.district_id)
         rows = (await db.execute(stmt)).all()
         return [
             {
@@ -106,10 +111,11 @@ class ImmunisationCoverage(BaseModel):
 )
 async def immunisation_coverage(
     db: Annotated[AsyncSession, Depends(get_db)],
-    _: Annotated[Principal, Depends(require_role("district_admin"))],
+    principal: Annotated[Principal, Depends(require_role("district_admin"))],
     since_days: int = Query(180, ge=1, le=365),
 ) -> list[ImmunisationCoverage]:
-    cache_key = f"analytics:imm:{since_days}"
+    scope = principal.district_id if principal.role == "district_admin" else "all"
+    cache_key = f"analytics:imm:{since_days}:{scope}"
 
     async def build() -> list[dict]:
         cutoff = datetime.now(UTC) - timedelta(days=since_days)
@@ -127,6 +133,8 @@ async def immunisation_coverage(
             .group_by(Patient.district, Observation.display)
             .order_by(Patient.district, Observation.display)
         )
+        if principal.role == "district_admin" and principal.district_id:
+            stmt = stmt.where(Patient.district == principal.district_id)
         rows = (await db.execute(stmt)).all()
         return [
             {
@@ -159,9 +167,10 @@ class StockOutRisk(BaseModel):
 )
 async def stock_out_risk(
     db: Annotated[AsyncSession, Depends(get_db)],
-    _: Annotated[Principal, Depends(require_role("district_admin"))],
+    principal: Annotated[Principal, Depends(require_role("district_admin"))],
 ) -> list[StockOutRisk]:
-    cache_key = "analytics:stockout"
+    scope = principal.district_id if principal.role == "district_admin" else "all"
+    cache_key = f"analytics:stockout:{scope}"
 
     async def build() -> list[dict]:
         stmt = (
@@ -181,6 +190,8 @@ async def stock_out_risk(
                 func.coalesce(func.sum(StockBatch.remaining), 0) < SupplyItem.reorder_threshold
             )
         )
+        if principal.role == "district_admin" and principal.district_id:
+            stmt = stmt.where(Facility.district == principal.district_id)
         rows = (await db.execute(stmt)).all()
         return [
             {
@@ -197,3 +208,70 @@ async def stock_out_risk(
 
     data = await _cached(cache_key, build)
     return [StockOutRisk(**d) for d in data]
+
+
+class FacilityEncounterCount(BaseModel):
+    facility_id: str
+    facility_name: str
+    district: str
+    encounter_count: int
+    patient_count: int
+
+
+@router.get(
+    "/encounters-by-facility",
+    response_model=list[FacilityEncounterCount],
+    summary="Encounter and patient counts by facility (worker-scoped or all)",
+)
+async def encounters_by_facility(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    principal: Annotated[Principal, Depends(require_role("worker"))],
+    facility_id: str | None = Query(
+        None,
+        description=(
+            "Restrict to this facility. Workers default to their own facility; "
+            "district_admin+ may pass any facility or omit to see all."
+        ),
+    ),
+    since_days: int = Query(30, ge=1, le=365),
+) -> list[FacilityEncounterCount]:
+    # Default scoping: a plain worker without district-level rights only
+    # ever sees their own facility's count. Higher roles may inspect any
+    # facility or aggregate all.
+    effective_facility = facility_id
+    if principal.role in ("worker", "pharmacist") and not effective_facility:
+        effective_facility = principal.facility_id
+
+    cache_key = f"analytics:enc-by-facility:{since_days}:{effective_facility or 'all'}"
+
+    async def build() -> list[dict]:
+        cutoff = datetime.now(UTC) - timedelta(days=since_days)
+        stmt = (
+            select(
+                Facility.id.label("facility_id"),
+                Facility.name.label("facility_name"),
+                Facility.district.label("district"),
+                func.count(Encounter.id).label("encounter_count"),
+                func.count(func.distinct(Encounter.patient_id)).label("patient_count"),
+            )
+            .join(Encounter, Encounter.facility_id == Facility.id)
+            .where(Encounter.started_at >= cutoff)
+            .group_by(Facility.id, Facility.name, Facility.district)
+            .order_by(func.count(Encounter.id).desc())
+        )
+        if effective_facility:
+            stmt = stmt.where(Facility.id == effective_facility)
+        rows = (await db.execute(stmt)).all()
+        return [
+            {
+                "facility_id": r.facility_id,
+                "facility_name": r.facility_name,
+                "district": r.district,
+                "encounter_count": int(r.encounter_count),
+                "patient_count": int(r.patient_count),
+            }
+            for r in rows
+        ]
+
+    data = await _cached(cache_key, build)
+    return [FacilityEncounterCount(**d) for d in data]

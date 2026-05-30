@@ -1,0 +1,198 @@
+# Crane Cloud deployment manifest — HealthSync Uganda
+#
+# This file is the source of truth for *what* gets deployed to Crane Cloud.
+# It contains:
+#   - App identification (name, image, port, replicas)
+#   - The NAMES of environment variables the app expects.
+#
+# It does NOT contain secret values. Secrets are resolved at deploy time from
+# the shell environment (loaded from `environments/<env>.env`, gitignored).
+#
+# The `cranecloud` CLI does not consume this YAML directly. The Makefile
+# (`infra/cranecloud/Makefile`) reads the structure of this file mentally
+# (image, port, env names) and passes the values via `cranecloud apps deploy`
+# flags. Keep the two in sync when you change either.
+#
+# Last reviewed: 2026-05-25.
+
+project:
+  name: healthsync-uganda
+  # The Crane Cloud project_id (UUID) is fetched once with
+  # `cranecloud projects list` and stored in environments/<env>.env as
+  # CRANECLOUD_PROJECT_ID. Do not paste it here.
+
+# ── Topology ─────────────────────────────────────────────────────────────
+#
+# A HealthSync deployment on Crane Cloud is one project containing four
+# Crane Cloud apps, in startup order:
+#
+#   1. PostgreSQL — deployed as a Crane Cloud app from a custom image
+#      (`postgres:16-alpine` + baked-in init.sql for the extensions
+#      pgcrypto/pg_trgm/btree_gin). NOT the Crane Cloud DaaS — see the
+#      "Self-hosted vs DaaS" decision in infra/cranecloud/README.md §0.1.
+#      Source image built by .github/workflows/build-push.yml.
+#
+#   2. Redis — Crane Cloud has no managed Redis DaaS, so it is deployed
+#      as a Crane Cloud app using the official `redis:7-alpine` image
+#      with `--requirepass` + `--maxmemory-policy allkeys-lru`.
+#
+#   3. Backend — FastAPI image from GHCR.
+#
+#   4. Frontend — Next.js image from GHCR.
+#
+# All four apps live in the same Crane Cloud project. Inter-app DNS
+# resolves by app name (operator confirms the actual hostname from the
+# Crane Cloud UI on each app's detail page after first deploy).
+#
+# Persistence caveat (READ BEFORE DEPLOY): Crane Cloud's public docs
+# (2026-05-25) do not document persistent volumes for app containers.
+# Both `postgres` and `redis` are therefore **assumed ephemeral**. For
+# any environment that holds real PHI:
+#
+#   - Operate a scheduled pg_dump → external object store (S3-compatible)
+#     per docs/BACKUP_RESTORE.md.
+#   - Monitor the Postgres app's pod restarts; any restart is a data-loss
+#     event until persistent storage is confirmed.
+#   - For pilot/production, consider:
+#       (a) switching `postgres` back to Crane Cloud DaaS (UI: Project →
+#           Databases → + New Database → PostgreSQL) — durable storage
+#           managed by the platform, AND/OR
+#       (b) migrating to NITA-U Government Cloud where persistent volumes
+#           are first-class.
+#
+# Redis ephemerality is a smaller concern — most Redis state in
+# HealthSync is rebuildable (idempotency cache, rate-limit buckets, NIRA
+# last-known-good cache). The DHIS2 outbox is the load-bearing exception;
+# see docs/RUNBOOK.md RB-03 and the Postgres-backed outbox replica on the
+# THREAT_MODEL.md §6 roadmap.
+
+apps:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────
+  postgres:
+    name: healthsync-postgres
+    image: docker.io/mpairwe7/healthsync-uganda-postgres
+    image_tag: main                            # tracks main branch; pin to v* in production
+    port: 5432
+    replicas: 1                                # NO HA — Crane Cloud apps don't support clustering today
+
+    env:
+      - POSTGRES_USER                          # default: healthsync
+      - POSTGRES_PASSWORD                      # 32+ char random; rotate per SECURITY.md
+      - POSTGRES_DB                            # default: healthsync
+
+  # ── Redis ──────────────────────────────────────────────────────────────
+  redis:
+    name: healthsync-redis
+    image: redis
+    image_tag: 7-alpine                       # set explicitly; do not use `latest`
+    port: 6379
+    replicas: 1                                # single replica per env; HA via Crane Cloud DaaS not available
+
+    # Redis is launched with explicit flags so it does not start with the
+    # default no-auth config. The password is generated per environment and
+    # appears in environments/<env>.env as REDIS_PASSWORD (gitignored).
+    command: |
+      sh -c "exec redis-server \
+        --requirepass \"$$REDIS_PASSWORD\" \
+        --maxmemory 256mb \
+        --maxmemory-policy allkeys-lru \
+        --appendonly no"
+
+    env:
+      - REDIS_PASSWORD                         # 32+ char random; set per env
+
+  # ── Backend ────────────────────────────────────────────────────────────
+  backend:
+    name: healthsync-backend
+    image: docker.io/mpairwe7/healthsync-uganda-backend
+    # Image tag is environment-specific (set in environments/<env>.env as
+    # BACKEND_IMAGE_TAG); the Makefile composes `${image}:${tag}` at deploy.
+    port: 8000
+    replicas: 2          # pilot default; raise to 4 (regional) / 12 (national)
+    command: ""          # use container's default CMD (uvicorn via Dockerfile)
+
+    # Environment variables expected by the application.
+    # Names only — values come from environments/<env>.env at deploy time.
+    env:
+      # Application
+      - APP_ENV                                # e.g. production / staging / pilot
+      - APP_NAME                               # default: healthsync-uganda
+      - LOG_LEVEL                              # INFO in prod, DEBUG in staging
+      - SECRET_KEY                             # 32-byte random — Crane Cloud secret manager preferred
+
+      # Database (Crane Cloud-provisioned Postgres add-on or external)
+      - DATABASE_URL
+
+      # Cache & queue (Crane Cloud-provisioned Redis add-on or external)
+      - REDIS_URL
+
+      # Observability — point at NITA-U OTel collector or skip in pilot
+      - OTEL_EXPORTER_OTLP_ENDPOINT
+      - OTEL_SERVICE_NAME
+      - OTEL_TRACES_SAMPLER
+
+      # External integrations (mocked endpoints in pilot, real URLs in prod)
+      - NIRA_BASE_URL
+      - NIRA_API_KEY
+      - DHIS2_BASE_URL
+      - DHIS2_USERNAME
+      - DHIS2_PASSWORD
+
+      # Resilience tuning (defaults in app/config.py; override per environment)
+      - CIRCUIT_BREAKER_FAILURE_THRESHOLD
+      - CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS
+      - RETRY_MAX_ATTEMPTS
+      - RETRY_BASE_DELAY_MS
+
+      # CORS — comma-separated list; must include the frontend's public URL
+      - CORS_ALLOW_ORIGINS
+
+  # ── Frontend ───────────────────────────────────────────────────────────
+  frontend:
+    name: healthsync-frontend
+    image: docker.io/mpairwe7/healthsync-uganda-frontend
+    port: 3000
+    replicas: 2
+    command: ""          # `next start` via Dockerfile CMD
+
+    env:
+      # NEXT_PUBLIC_* keys are baked at build time but the runtime values
+      # also matter for hydration. Set both at build (CI) and deploy (here).
+      - NEXT_PUBLIC_API_BASE_URL               # https://<backend-url>.cranecloud.ug
+      - NEXT_PUBLIC_APP_NAME
+
+# ── Notes ────────────────────────────────────────────────────────────────
+#
+# 1. Images must be reachable from Crane Cloud's pull side. Default registry
+#    is docker.io (Docker Hub); Crane Cloud's RENU and AHUMAIN ML clusters
+#    cannot pull from ghcr.io as of 2026-05-26 — see infra/cranecloud/README.md
+#    §9.1 for the control-deploy evidence. Redis is the official Docker Hub
+#    library image; backend/frontend/postgres are published from this repo
+#    via .github/workflows/build-push.yml.
+#
+# 2. Secrets are passed via `cranecloud apps deploy -e KEY=value` flags. The
+#    values appear briefly on the command line — visible to `ps` on the host
+#    that runs the deploy. For highly sensitive secrets (SECRET_KEY, NIRA_API_KEY,
+#    DHIS2_PASSWORD), prefer Crane Cloud's web-dashboard secret manager and
+#    set them there once, rather than passing them through the CLI repeatedly.
+#
+# 3. Per-environment overrides live in `environments/<env>.env`. Templates
+#    (`*.env.example`) are committed; real `.env` files are gitignored.
+#
+# 4. After a `cranecloud apps deploy`, the CLI returns an APP_ID (UUID).
+#    Save it to environments/<env>.env as REDIS_APP_ID / BACKEND_APP_ID /
+#    FRONTEND_APP_ID so subsequent `make update-*` calls can target the
+#    existing app instead of creating a duplicate.
+#
+# 5. The DATABASE_URL value comes from the Crane Cloud Databases panel
+#    (UI-only; no CLI command for DB creation today). After creating the
+#    Postgres DaaS, click "Copy credentials" and paste the connection
+#    string into DATABASE_URL in environments/<env>.env.
+#
+# 6. Inter-app DNS within a Crane Cloud project is not documented in their
+#    public docs as of 2026-05-25. We expose the backend's REDIS_URL via a
+#    field in environments/<env>.env that the operator fills in with the
+#    actual reachable host:port once the Redis app is deployed and the
+#    cluster-internal name is known (Crane Cloud's web UI shows the app's
+#    URL after deploy).

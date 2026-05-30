@@ -93,7 +93,81 @@ Each script writes a Markdown report to `loadtest-results/$(date +%F)/` with the
 | Recovery Point Objective (RPO) | 15 minutes | n/a |
 | Recovery Time Objective (RTO) | 60 minutes | n/a |
 
-## 6. Known scaling limits & what we will do
+## 6. Load-test methodology & reproducibility
+
+The numbers in §1 and the SLOs in §5 are claims that must be falsifiable. This section is the *recipe* a panel reviewer can run to produce them independently.
+
+### 6.1 Harness
+
+| Tool       | Purpose                                       | Where                                                                            |
+| ---------- | --------------------------------------------- | -------------------------------------------------------------------------------- |
+| `vegeta`   | HTTP load generator (constant-rate attacks)    | Embedded in `scripts/loadtest-*.sh`                                              |
+| `wrk2`     | Tail-latency-faithful generator (coordinated-omission-corrected) | Optional, when verifying p99 claims                                              |
+| `vegeta` reports | `vegeta report -type=hist[…]` + Markdown writer | The scripts pipe results into a date-stamped report under `loadtest-results/`    |
+| Grafana     | Live dashboards during the run                 | `HealthSync — overview` board (see [OBSERVABILITY.md §4](./OBSERVABILITY.md#4-dashboards)) |
+| OpenTelemetry traces | Per-request spans + per-replica breakdown | Default exporter in `docker compose --profile observability up`                  |
+
+### 6.2 Reproduction recipe
+
+```bash
+# 1. Bring up the stack in the load-test profile
+make full                                               # backend + frontend + postgres + redis
+docker compose --profile observability up -d            # OTel Collector for live traces
+
+# 2. Seed a representative dataset
+make seed                                               # idempotent demo set
+
+# 3. Run the baseline (single replica, mixed read/write workload)
+scripts/loadtest-baseline.sh
+#   writes:  loadtest-results/<date>/baseline.md
+#   contains: per-endpoint p50/p95/p99 table + Vegeta histogram
+
+# 4. Demonstrate horizontal scale-out
+scripts/loadtest-scaleout.sh
+#   scales API from 1 → 2 → 3 replicas; reports throughput per tier
+
+# 5. Demonstrate analytics cache effectiveness
+scripts/loadtest-analytics.sh
+#   cold (cache flushed) vs. warm; isolates the 60 s TTL contribution
+```
+
+Every script writes a Markdown report with:
+
+- Wall-clock window (start + end ISO-8601 UTC).
+- Hardware shape (`uname -a`, container CPU/memory limits).
+- Per-endpoint p50 / p95 / p99 latency, throughput (rps), error rate.
+- Vegeta-format raw histogram (so a reviewer can recompute any percentile).
+- Link to the corresponding Grafana time range, if observability is up.
+
+Reports are committed under `loadtest-results/<date>/` and surfaced in the submission packet. The submission cover letter references the specific commit hash so the panel can verify the report against the code that produced it.
+
+### 6.3 What "good" looks like
+
+A reviewer should see, in the baseline report:
+
+- `/healthz`: p95 ≤ 10 ms (the trivial path; protects against accidental regressions).
+- `GET /api/v1/patients?q=…`: p95 ≤ 150 ms at 200 rps on a 1 vCPU / 1 GB single replica.
+- `POST /api/v1/encounters`: p95 ≤ 250 ms at 100 rps on the same shape.
+- Error rate < 0.1 % for non-saturating loads; deliberate overshoot tests document the breaker-tripping behaviour.
+
+A scale-out report should show **near-linear** throughput scaling from 1 → 3 replicas behind the load balancer; sub-linear scaling is investigated as a defect (typically a Postgres connection-pool saturation; see [RUNBOOK.md RB-04](./RUNBOOK.md#rb-04--patient-search-slow)).
+
+### 6.4 National-scale projection
+
+The pilot-tier numbers in §1 project to the national tier via two known scaling rules:
+
+1. **Linear throughput per replica** (stateless API). The national plan of 12 replicas at 4 vCPU / 4 GB each provides ~48 vCPU of API capacity vs. the pilot's 2 vCPU — a 24× compute increase. Sustained throughput projects to ~5,000 rps national vs. ~200 rps pilot, comfortably above the 5,000 rps national-peak target in §2.
+2. **Sub-linear Postgres scaling**. A single primary saturates writes at ~5,000 tps; the national plan uses Patroni HA with read-replicas to offload reads and is sized to leave headroom. Beyond that, sharding by district (Citus) is the documented next step in §7.
+
+### 6.5 Reproducibility caveats
+
+- Results vary with the underlying VM host. The submission report records the host identifier and the noisy-neighbour assumption (NITA-U cloud or AWS Cape Town as documented in §2's cost model).
+- Cold-start vs. warm-cache makes a large difference for analytics endpoints; the methodology runs both and reports separately.
+- Re-running on a development laptop with Docker Desktop will *not* reproduce production numbers — the I/O subsystem dominates. For the submission, the load test runs against a representative pilot-tier VM.
+
+---
+
+## 7. Known scaling limits & what we will do
 
 | Limit | Where it bites first | Resolution |
 |---|---|---|

@@ -41,3 +41,22 @@ tsconfig.tsbuildinfo
 *.log
 *.pid
 .cache/
+
+# Local tooling
+.claude/settings.local.json
+.claude/plans/
+
+# Submission packet — kept out of git per project policy
+submission/
+
+# Generated QA / evidence artefacts (kept locally, committed only when sanitised)
+loadtest-results/
+lighthouse-results/
+axe-results/
+e2e-results/
+**/test-results/
+**/playwright-report/
+
+# Crane Cloud per-environment values (templates *.env.example ARE committed)
+/infra/cranecloud/environments/*.env
+!/infra/cranecloud/environments/*.env.example

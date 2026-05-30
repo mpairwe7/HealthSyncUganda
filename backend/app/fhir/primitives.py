@@ -95,6 +95,18 @@ class Quantity(FhirModel):
     code: str | None = None
 
 
+class Meta(FhirModel):
+    """https://hl7.org/fhir/R4/resource.html#Meta — resource-level audit data.
+
+    `lastUpdated` is the most commonly consumed field (HAPI validators check
+    for it; the conformance harness asserts presence). `versionId` is the
+    record_version where the ORM model tracks one.
+    """
+
+    lastUpdated: datetime | None = None
+    versionId: str | None = None
+
+
 # Helpful re-exports
 __all__ = [
     "Address",
@@ -104,6 +116,7 @@ __all__ = [
     "FhirModel",
     "HumanName",
     "Identifier",
+    "Meta",
     "Period",
     "Quantity",
     "Reference",
