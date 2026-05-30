@@ -43,11 +43,12 @@ async def client() -> AsyncIterator[AsyncClient]:
     os.environ["AUTO_CREATE_SCHEMA"] = "true"
     get_settings.cache_clear()
 
-    from app.main import create_app
-    from app.services.nira_client import NinVerification, NiraClient, get_nira_client
     from sqlalchemy import select
+
     from app.db.models.patient import Patient
     from app.db.session import get_db
+    from app.main import create_app
+    from app.services.nira_client import NinVerification, get_nira_client
 
     app = create_app()
 
