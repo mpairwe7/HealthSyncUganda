@@ -1,6 +1,7 @@
 """All ORM models. Importing this package registers them with the metadata."""
 
 from app.db.models.audit_log import AuditLog
+from app.db.models.caregiver import CaregiverLink
 from app.db.models.consent import Consent
 from app.db.models.encounter import Encounter, Observation
 from app.db.models.facility import Facility
@@ -15,6 +16,7 @@ from app.db.models.user import User
 
 __all__ = [
     "AuditLog",
+    "CaregiverLink",
     "Consent",
     "Encounter",
     "Facility",

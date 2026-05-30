@@ -7,7 +7,7 @@
     "dev": "next dev --turbo",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "e2e": "playwright test",
     "e2e:staging": "playwright test --config=e2e/playwright.config.staging.ts",

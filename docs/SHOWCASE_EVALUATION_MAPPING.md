@@ -129,6 +129,29 @@ Stable IDs: `EV-CC-NN` where `CC` is the criterion code and `NN` is the sub-crit
 
 ---
 
+## Live-demo verifications (panel-clickable on staging `sha-439fc79`)
+
+Concrete user journeys the panel can run on the live deployment. Each takes ≤2 minutes. See `CHANGELOG.md "Unreleased"` for what shipped in each (CP / WD / MR / CI / IM).
+
+| ID         | Demo                                                              | Where to click                                                                 | Expected outcome                                                                                                |
+| ---------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| EV-DEMO-01 | Citizen sees own immutable access log                             | `/citizen/login` (`CM85051712345X` / `000000`) → **Access history**            | List of every read; the very act of opening the page appears at the top within seconds.                         |
+| EV-DEMO-02 | Citizen self-grants & revokes consent                             | `/citizen/consent`                                                             | Grant succeeds (201); revoke immediate; safety regression: another citizen's token cannot revoke (403).         |
+| EV-DEMO-03 | Mother sees both her children's immunisation status               | `/citizen/login` (`CF93081244778K` / `000000`) → **My family**                  | 2 child cards with overdue antigen counts + tap-through to per-child UNEPI status table.                        |
+| EV-DEMO-04 | Worker scans NIN; system blocks already-given BCG                 | `/login` (`nurse.gulu` / `demo1234`) → **Immunisations** → search any paediatric NIN | Status table renders BEFORE the vaccine dropdown; BCG row shows *complete*; vaccine dropdown flags BCG as blocked with a written reason. |
+| EV-DEMO-05 | Override flow is auditable                                        | Same as above, tick "Override" + provide reason → Administer                    | Encounter + dispense recorded with the override reason embedded; visible from `/citizen/audit`.                  |
+| EV-DEMO-06 | Pharmacist dispense is now per-patient audited                    | `/login` (`pharmacist.mbarara` / `demo1234`) → **Supply** → Dispense           | `POST /supply/dispense` writes an `audit_log` row with `actor_role=pharmacist`, `action=dispense`, `resource_id={patient_id}`. |
+| EV-DEMO-07 | Worker captures the full LOINC vitals set                         | `/worker/patients/{id}` → **Record new** tab                                   | 7-vital form (temperature, BP, weight, height, pulse, SpO₂, respiratory rate); each LOINC-coded with min/max guards. |
+| EV-DEMO-08 | Mark deceased is reversible + audited                             | `/worker/patients/{id}` → **Admin** tab                                        | Inline confirm requires a reason; `Patient.deceased` flips; reversible; both directions audited.                 |
+| EV-DEMO-09 | Per-facility "today" card                                          | `/worker` (`nurse.gulu`)                                                       | "This facility" card shows today's + 30-day encounter and patient counts — scoped to Gulu RRH automatically.    |
+| EV-DEMO-10 | Inter-facility transfer history with filters                      | `/worker/supply/transfers`                                                     | Seeded with ~6 transfers; window chips 30/90/365d; scope toggle "My facility" / "All".                          |
+| EV-DEMO-11 | Mobile usability — hamburger nav                                  | Open `/worker` on a phone (≤640px viewport)                                    | Inline nav collapses to a hamburger; tap reveals slide-down sheet with role-filtered links + sign-out.           |
+| EV-DEMO-12 | Citizen-side caregiver-aware permission                           | API: `GET /api/v1/patients/{child_id}` as the linked mother                    | 200 with the child's full record; same call from any unrelated citizen → 403.                                   |
+
+All 12 demos are covered by Playwright sections G / H / I / J / K in `frontend/e2e/staging-smoke.spec.ts` (96 tests total). Re-run on demand with `cd frontend && bun run playwright test --config=e2e/playwright.config.staging.ts`.
+
+---
+
 ## Cross-references
 
 - [README.md](../README.md) — entry point.

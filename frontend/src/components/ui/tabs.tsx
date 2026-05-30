@@ -42,15 +42,21 @@ export function TabsList({
   className?: string;
   children: React.ReactNode;
 }) {
+  // Wrap the inline-flex pill bar in a horizontally scrollable container.
+  // On phones with 5+ tabs the bar would otherwise wrap awkwardly or get
+  // visually clipped; horizontal scroll keeps every tab reachable with
+  // one swipe.
   return (
-    <div
-      role="tablist"
-      className={cn(
-        "inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground",
-        className,
-      )}
-    >
-      {children}
+    <div className="-mx-2 overflow-x-auto px-2 sm:mx-0 sm:px-0">
+      <div
+        role="tablist"
+        className={cn(
+          "inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground",
+          className,
+        )}
+      >
+        {children}
+      </div>
     </div>
   );
 }

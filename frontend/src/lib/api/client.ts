@@ -39,6 +39,13 @@ interface RequestOptions {
   retries?: number;
   /** Add an Idempotency-Key. Defaults to true for unsafe methods. */
   idempotent?: boolean;
+  /**
+   * Explicit Idempotency-Key value. When provided, the client uses this
+   * instead of generating a fresh one. The offline-replay drainer passes
+   * the queue-stored key so server-side deduplication works across retries
+   * after a network glitch.
+   */
+  idempotencyKey?: string;
   /** Skip auth header; used by /auth/login itself. */
   noAuth?: boolean;
   signal?: AbortSignal;
@@ -105,8 +112,15 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     const token = authToken();
     if (token) headers.Authorization = `Bearer ${token}`;
   }
-  const idempotent = options.idempotent ?? !SAFE_METHODS.has(method);
-  if (idempotent) headers["Idempotency-Key"] = ulid();
+  // Idempotency-Key precedence:
+  //   1. caller-supplied key (offline drainer replays carry the stored key)
+  //   2. fresh ulid if `idempotent` (default for unsafe methods)
+  if (options.idempotencyKey) {
+    headers["Idempotency-Key"] = options.idempotencyKey;
+  } else {
+    const idempotent = options.idempotent ?? !SAFE_METHODS.has(method);
+    if (idempotent) headers["Idempotency-Key"] = ulid();
+  }
 
   const init: RequestInit = {
     method,

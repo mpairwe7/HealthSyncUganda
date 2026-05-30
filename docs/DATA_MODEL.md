@@ -330,6 +330,29 @@ Source: `backend/app/db/models/audit_log.py`. Writes only via `app.core.audit.re
 
 **Retention:** ≥ 1 year for DPPA s.13/s.14; longer for forensic value. Aged rows can be moved to cold storage but not deleted while any referenced resource still exists.
 
+### 3.12 `caregiver_links` — caregiver↔child family graph
+
+Source: `backend/app/db/models/caregiver.py`. Supports the real-world case of one parent bringing multiple children to a facility in one visit, and the corresponding citizen-portal "My family" view that lets a mother see each child's immunisation status side-by-side without separate logins.
+
+| Column          | Type        | Null | Index                                                | Class | Notes |
+| --------------- | ----------- | ---- | ---------------------------------------------------- | ----- | ----- |
+| `id`            | String(26)  | NO   | PK                                                   | Op    | ULID. |
+| `caregiver_id`  | String(26)  | NO   | btree, `ix_caregiver_links_caregiver_child` (composite) | **FK→patients.id** | `ON DELETE CASCADE`. The adult / older sibling / guardian. |
+| `child_id`      | String(26)  | NO   | btree, composite (above)                              | **FK→patients.id** | `ON DELETE CASCADE`. The dependent — direction matters for "my children" queries. |
+| `relationship`  | String(40)  | NO   | —                                                    | Op    | Free text but UI bounded to a fixed set: `mother`, `father`, `guardian`, `grandparent`, `sibling`, `aunt`, `uncle`, `other`. |
+| `created_at`    | DateTime(tz)| NO   | —                                                    | Op    | |
+| `updated_at`    | DateTime(tz)| NO   | —                                                    | Op    | Bumped when the relationship label is updated via re-POST (idempotency). |
+
+**Constraints:**
+- `UNIQUE (caregiver_id, child_id)` — `uq_caregiver_links_pair`; the same pair cannot be linked twice. Worker UI's "Link caregiver" form upserts the relationship label without creating duplicate rows.
+- `CHECK caregiver_id <> child_id` — enforced at the API layer (422 from `POST /patients/{id}/caregivers`); a database CHECK constraint is a planned migration.
+
+**Why this shape and not a wider `family_unit`/`household` table:** the relationship is directional and per-pair (a sibling may be both caregiver and child in different rows). Pair-level granularity also lets revocation be precise — a grandmother stops being recorded as caregiver for one grandchild without disturbing the rest of the family.
+
+**Permission semantics:** the caregiver-link row is what unlocks the citizen-side `_citizen_can_read()` permission helper in `app/api/v1/patients.py` — a citizen JWT can read a patient record IF their NIN matches OR a `CaregiverLink` exists with `(caregiver.nin = JWT.sub, child.id = target.id)`. This is the mechanism behind the `/citizen/family/{child_id}` page.
+
+**Retention:** indefinite while both patients exist; cascades on patient deletion.
+
 ---
 
 ## 4. Index strategy

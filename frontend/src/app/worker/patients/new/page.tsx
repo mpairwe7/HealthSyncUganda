@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { OfflineBanner } from "@/components/ui/offline-banner";
 import { Select } from "@/components/ui/select";
 import { useCreatePatient } from "@/lib/api/hooks";
 import { useUi } from "@/lib/store/ui";
@@ -96,6 +97,7 @@ export default function NewPatientPage() {
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
+      <OfflineBanner />
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Enrol new patient</h1>
         <p className="text-muted-foreground">

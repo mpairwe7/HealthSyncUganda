@@ -20,21 +20,36 @@ import { enqueue } from "@/lib/offline/queue";
 import { useUi } from "@/lib/store/ui";
 
 import type {
+  AntigenStatusOut,
+  AuditEntryOut,
+  CaregiverLinkIn,
+  CaregiverLinkOut,
+  ConsentOut,
+  DispenseQuery,
+  DispenseResult,
+  DistrictEncounterCount,
   EncounterCreate,
   EncounterOut,
+  FacilityEncounterCount,
   FacilityOut,
   FacilityStockSnapshot,
+  FamilyMemberOut,
   ImmunisationCoverage,
+  ImmunisationOut,
+  MarkDeceasedBody,
+  ObservationIn,
+  OwnConsentGrant,
+  PaginatedPatients,
   PatientCreate,
   PatientOut,
-  PatientSummary,
-  PaginatedPatients,
+  ProfileUpdate,
+  ReceiveStockBody,
+  StaffMeOut,
   StockOutRisk,
   StockTransferCreate,
   StockTransferOut,
   SupplyItemOut,
   TokenResponse,
-  DistrictEncounterCount,
 } from "@/types/api";
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
@@ -230,5 +245,249 @@ export function useStockOutRisk() {
   return useQuery({
     queryKey: ["analytics", "stock-out"],
     queryFn: () => apiRequest<StockOutRisk[]>("/api/v1/analytics/stock-out-risk"),
+  });
+}
+
+// ── /me — citizen self-serve ─────────────────────────────────────────────────
+//
+// All /me/* endpoints require a citizen-role JWT (the backend rejects others
+// with 403). They use the JWT subject (NIN) to look up the caller's patient
+// row, so no patient_id needs to be passed from the UI.
+
+export function useMe(enabled = true) {
+  return useQuery({
+    queryKey: ["me"],
+    queryFn: () => apiRequest<PatientOut>("/api/v1/me"),
+    enabled,
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useMyEncounters(enabled = true) {
+  return useQuery({
+    queryKey: ["me", "encounters"],
+    queryFn: () => apiRequest<EncounterOut[]>("/api/v1/me/encounters"),
+    enabled,
+  });
+}
+
+export function useMyImmunisations(enabled = true) {
+  return useQuery({
+    queryKey: ["me", "immunisations"],
+    queryFn: () => apiRequest<ImmunisationOut[]>("/api/v1/me/immunisations"),
+    enabled,
+  });
+}
+
+export function useMyAudit(sinceDays: 7 | 30 | 90 = 90, enabled = true) {
+  return useQuery({
+    queryKey: ["me", "audit", sinceDays],
+    queryFn: () =>
+      apiRequest<AuditEntryOut[]>("/api/v1/me/audit", {
+        query: { since_days: sinceDays },
+      }),
+    enabled,
+  });
+}
+
+export function useGrantOwnConsent() {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (body: OwnConsentGrant) =>
+      apiRequest<ConsentOut>("/api/v1/me/consent/grant", { method: "POST", body }),
+    onSuccess: (data) => {
+      pushToast({
+        kind: "success",
+        title: "Consent granted",
+        description: data.scope.replace(/_/g, " "),
+      });
+      qc.invalidateQueries({ queryKey: ["consents"] });
+      qc.invalidateQueries({ queryKey: ["me", "audit"] });
+    },
+  });
+}
+
+export function useUpdateMyProfile() {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (body: ProfileUpdate) =>
+      apiRequest<PatientOut>("/api/v1/me/profile", { method: "PATCH", body }),
+    onSuccess: () => {
+      pushToast({ kind: "success", title: "Profile updated" });
+      qc.invalidateQueries({ queryKey: ["me"] });
+    },
+  });
+}
+
+// ── Worker self-serve + clinical workflows ───────────────────────────────────
+
+export function useMyStaff(enabled = true) {
+  return useQuery({
+    queryKey: ["me", "staff"],
+    queryFn: () => apiRequest<StaffMeOut>("/api/v1/me/staff"),
+    enabled,
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useEncountersByFacility(
+  filters: { facility_id?: string; since_days?: number } = {},
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["analytics", "encounters-by-facility", filters],
+    queryFn: () =>
+      apiRequest<FacilityEncounterCount[]>("/api/v1/analytics/encounters-by-facility", {
+        query: filters,
+      }),
+    enabled,
+  });
+}
+
+export function useAddObservation(encounterId: string | undefined) {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (body: ObservationIn[]) =>
+      apiRequest<EncounterOut>(`/api/v1/encounters/${encounterId}/observations`, {
+        method: "POST",
+        body,
+      }),
+    onSuccess: (data) => {
+      pushToast({
+        kind: "success",
+        title: "Observation added",
+        description: `${data.observations.length} observations on record`,
+      });
+      qc.invalidateQueries({ queryKey: ["encounters", data.patient_id] });
+      qc.invalidateQueries({ queryKey: ["me", "encounters"] });
+    },
+  });
+}
+
+export function useMarkDeceased() {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: ({ patientId, body }: { patientId: string; body: MarkDeceasedBody }) =>
+      apiRequest<PatientOut>(`/api/v1/patients/${patientId}/deceased`, {
+        method: "PATCH",
+        body,
+      }),
+    onSuccess: (data) => {
+      pushToast({
+        kind: data.deceased ? "warning" : "success",
+        title: data.deceased ? "Marked as deceased" : "Flag cleared",
+      });
+      qc.invalidateQueries({ queryKey: ["patient", data.id] });
+      qc.invalidateQueries({ queryKey: ["patients"] });
+    },
+  });
+}
+
+export function useReceiveStock() {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (body: ReceiveStockBody) =>
+      apiRequest<{ id: string }>("/api/v1/supply/batches", { method: "POST", body }),
+    onSuccess: () => {
+      pushToast({ kind: "success", title: "Stock received and recorded" });
+      qc.invalidateQueries({ queryKey: ["supply"] });
+      qc.invalidateQueries({ queryKey: ["analytics", "stock-out"] });
+    },
+  });
+}
+
+export function useDispense() {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (q: DispenseQuery) =>
+      apiRequest<DispenseResult>("/api/v1/supply/dispense", {
+        method: "POST",
+        query: { ...q },
+        // dispense uses query params on the backend; body is unused.
+      }),
+    onSuccess: () => {
+      pushToast({ kind: "success", title: "Dispense recorded" });
+      qc.invalidateQueries({ queryKey: ["supply"] });
+    },
+  });
+}
+
+export function useStockTransfers(
+  filters: { facility_id?: string; since_days?: number } = {},
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["supply", "transfers", filters],
+    queryFn: () =>
+      apiRequest<StockTransferOut[]>("/api/v1/supply/transfers", { query: filters }),
+    enabled,
+  });
+}
+
+// ── Immunisation status + family graph ──────────────────────────────────────
+
+export function useImmunisationStatus(patientId: string | undefined) {
+  return useQuery({
+    queryKey: ["immunisation-status", patientId],
+    queryFn: () =>
+      apiRequest<AntigenStatusOut[]>(`/api/v1/patients/${patientId}/immunisation-status`),
+    enabled: !!patientId,
+  });
+}
+
+export function useFamily(patientId: string | undefined) {
+  return useQuery({
+    queryKey: ["family", patientId],
+    queryFn: () =>
+      apiRequest<FamilyMemberOut[]>(`/api/v1/patients/${patientId}/family`),
+    enabled: !!patientId,
+  });
+}
+
+export function useMyFamily(enabled = true) {
+  return useQuery({
+    queryKey: ["me", "family"],
+    queryFn: () => apiRequest<FamilyMemberOut[]>("/api/v1/me/family"),
+    enabled,
+  });
+}
+
+export function useLinkCaregiver(childPatientId: string | undefined) {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (body: CaregiverLinkIn) =>
+      apiRequest<CaregiverLinkOut>(
+        `/api/v1/patients/${childPatientId}/caregivers`,
+        { method: "POST", body },
+      ),
+    onSuccess: () => {
+      pushToast({ kind: "success", title: "Caregiver linked" });
+      qc.invalidateQueries({ queryKey: ["family", childPatientId] });
+      qc.invalidateQueries({ queryKey: ["me", "family"] });
+    },
+  });
+}
+
+export function useUnlinkCaregiver(childPatientId: string | undefined) {
+  const qc = useQueryClient();
+  const pushToast = useUi((s) => s.pushToast);
+  return useMutation({
+    mutationFn: (linkId: string) =>
+      apiRequest<void>(
+        `/api/v1/patients/${childPatientId}/caregivers/${linkId}`,
+        { method: "DELETE" },
+      ),
+    onSuccess: () => {
+      pushToast({ kind: "success", title: "Caregiver link removed" });
+      qc.invalidateQueries({ queryKey: ["family", childPatientId] });
+      qc.invalidateQueries({ queryKey: ["me", "family"] });
+    },
   });
 }

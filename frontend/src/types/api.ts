@@ -185,3 +185,168 @@ export type StockOutRisk = {
   reorder_threshold: number;
   days_of_cover_estimated: number | null;
 };
+
+// ── Consent ──────────────────────────────────────────────────────────────────
+
+export type ConsentScope =
+  | "share_records_across_facilities"
+  | "share_with_district_health_office"
+  | "share_with_research"
+  | "share_with_emergency_services";
+
+export type ConsentOut = {
+  id: string;
+  patient_id: string;
+  scope: ConsentScope;
+  purpose: string;
+  granted_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+};
+
+export type OwnConsentGrant = {
+  scope: ConsentScope;
+  purpose: string;
+  expires_at?: string | null;
+};
+
+// ── Me (self-serve) ──────────────────────────────────────────────────────────
+
+export type ImmunisationOut = {
+  id: string;
+  encounter_id: string;
+  patient_id: string;
+  code_system: string;
+  code: string;
+  display: string | null;
+  administered_at: string;
+  facility_id: string | null;
+};
+
+export type AuditEntryOut = {
+  id: string;
+  actor_role: string;
+  actor_facility_id: string | null;
+  action: string;
+  purpose: string | null;
+  resource_type: string;
+  resource_id: string;
+  consent_id: string | null;
+  occurred_at: string;
+};
+
+export type ProfileUpdate = {
+  phone?: string | null;
+  email?: string | null;
+  sub_county?: string | null;
+  parish?: string | null;
+  village?: string | null;
+};
+
+// ── Staff self-serve + worker workflows ──────────────────────────────────────
+
+export type StaffMeOut = {
+  user_id: string;
+  username: string;
+  full_name: string;
+  role: Role;
+  facility_id: string | null;
+  facility_name: string | null;
+  facility_level: string | null;
+  facility_district: string | null;
+  active: boolean;
+};
+
+export type MarkDeceasedBody = {
+  deceased: boolean;
+  purpose?: string | null;
+};
+
+export type FacilityEncounterCount = {
+  facility_id: string;
+  facility_name: string;
+  district: string;
+  encounter_count: number;
+  patient_count: number;
+};
+
+export type ReceiveStockBody = {
+  supply_item_id: string;
+  facility_id: string;
+  lot_number: string;
+  quantity: number;
+  expires_on: string;        // YYYY-MM-DD
+  received_on: string;       // YYYY-MM-DD
+  cost_ugx?: number | null;
+};
+
+export type DispenseQuery = {
+  supply_item_id: string;
+  facility_id: string;
+  quantity: number;
+  encounter_id?: string | null;
+  patient_id?: string | null;
+  purpose?: string;
+};
+
+export type DispenseResult = {
+  dispensed_quantity: number;
+  events_recorded: number;
+};
+
+// ── Immunisation schedule + family ───────────────────────────────────────────
+
+export type ImmunisationStatusLevel =
+  | "complete"
+  | "due"
+  | "due-soon"
+  | "overdue"
+  | "not-yet";
+
+export type AntigenStatusOut = {
+  antigen: string;            // short label "BCG", "DPT", …
+  display: string;            // human readable
+  snomed_code: string;
+  series_size: number;
+  doses_given: number;
+  next_dose_number: number | null;
+  next_due_date: string | null;    // ISO date
+  overdue_days: number;
+  last_dose_at: string | null;
+  status: ImmunisationStatusLevel;
+};
+
+export type CaregiverRelationship =
+  | "mother"
+  | "father"
+  | "guardian"
+  | "grandparent"
+  | "sibling"
+  | "aunt"
+  | "uncle"
+  | "other";
+
+export type FamilyMemberOut = {
+  link_id: string;
+  patient_id: string;
+  nin: string;
+  given_name: string;
+  family_name: string;
+  birth_date: string;
+  gender: Gender;
+  relationship: string;
+  overdue_antigen_count: number;
+};
+
+export type CaregiverLinkIn = {
+  caregiver_nin: string;
+  relationship: CaregiverRelationship;
+};
+
+export type CaregiverLinkOut = {
+  id: string;
+  caregiver_id: string;
+  child_id: string;
+  relationship: string;
+  created_at: string;
+};

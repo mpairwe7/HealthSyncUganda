@@ -46,6 +46,22 @@ export async function listPending(): Promise<QueueEntry[]> {
     .sort((a, b) => a.enqueuedAt - b.enqueuedAt);
 }
 
+/**
+ * Items that the drainer marked as permanently failed (negative attempts —
+ * server returned 4xx). The sync drawer should surface these for human
+ * review rather than leaving them silently parked in IndexedDB.
+ */
+export async function listPermanentlyFailed(): Promise<QueueEntry[]> {
+  const all = await listPending();
+  return all.filter((e) => e.attempts < 0);
+}
+
+/** Items still eligible for automatic replay (non-negative attempts). */
+export async function listReplayable(): Promise<QueueEntry[]> {
+  const all = await listPending();
+  return all.filter((e) => e.attempts >= 0);
+}
+
 export async function remove(id: string) {
   await del(QUEUE_PREFIX + id);
   notify();
