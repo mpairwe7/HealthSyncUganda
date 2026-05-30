@@ -25,12 +25,18 @@ export async function drainQueue(): Promise<{ delivered: number; remaining: numb
     if (typeof navigator !== "undefined" && !navigator.onLine) return;
     const pending = await listPending();
     for (const entry of pending) {
+      // Skip entries that have already been marked as permanently failed.
+      // `bumpAttempt` records permanent failures as a negative attempt count.
+      if (entry.attempts < 0) continue;
       try {
+        // Pass the *stored* Idempotency-Key so the server deduplicates
+        // replays of the same logical write — a fresh key on every retry
+        // would defeat the whole point of the offline queue.
         await apiRequest(entry.path, {
           method: entry.method,
           body: entry.body,
           retries: 1,
-          idempotent: false, // we set the header explicitly below
+          idempotencyKey: entry.idempotencyKey,
         });
         await remove(entry.id);
       } catch (err) {

@@ -11,6 +11,7 @@ from app.fhir.primitives import (
     CodeableConcept,
     Coding,
     FhirModel,
+    Meta,
     Period,
     Quantity,
     Reference,
@@ -22,6 +23,7 @@ class EncounterResource(FhirModel):
 
     resourceType: Literal["Encounter"] = "Encounter"
     id: str | None = None
+    meta: Meta | None = None
     status: Literal[
         "planned", "arrived", "triaged", "in-progress", "onleave", "finished", "cancelled"
     ] = "in-progress"
@@ -48,6 +50,7 @@ class ObservationResource(FhirModel):
 
     resourceType: Literal["Observation"] = "Observation"
     id: str | None = None
+    meta: Meta | None = None
     status: Literal[
         "registered",
         "preliminary",

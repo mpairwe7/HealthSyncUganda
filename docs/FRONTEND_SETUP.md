@@ -11,7 +11,7 @@ The `frontend/` package is a Next.js 16 application with TypeScript strict mode,
 
 | Tool      | Version  | Why                                                   |
 | --------- | -------- | ----------------------------------------------------- |
-| Bun       | **1.2+** | Package manager + runner (replaces npm / yarn / pnpm).|
+| Bun       | **1.1+** | Package manager + runner (replaces npm / yarn / pnpm). `frontend/package.json` pins `engines.bun >= 1.1.0`. |
 | Node      | not required | We do not use Node to run the dev server.        |
 | The backend running on `http://localhost:8000` | — | The dev server reads from `NEXT_PUBLIC_API_BASE_URL`. |
 
@@ -20,7 +20,7 @@ Install Bun if you do not have it:
 ```bash
 curl -fsSL https://bun.sh/install | bash
 exec $SHELL                  # reload PATH
-bun --version                # expect 1.2.x or newer
+bun --version                # expect 1.1.x or newer
 ```
 
 We deliberately do not use Node to run anything — Bun handles install, dev server, type-check, lint, and test. If your editor offers to use `npm install`, decline.

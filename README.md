@@ -54,7 +54,7 @@ A full architectural deep-dive is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.
 
 ## Tech stack
 
-**Frontend** — Next.js 16.2.3 (App Router, streaming, RSC), TypeScript (strict), Bun, Zustand, TanStack Query v5 (persisted IndexedDB cache + offline mutation queue), shadcn/ui, Tailwind CSS.
+**Frontend** — Next.js 16.2.6 (App Router, streaming, RSC), TypeScript (strict), Bun, Zustand, TanStack Query v5 (persisted IndexedDB cache + offline mutation queue), shadcn/ui, Tailwind CSS.
 
 **Backend** — FastAPI, Pydantic v2 (strict), uv, Python 3.12+, SQLAlchemy 2 async, asyncpg, Redis, OpenTelemetry.
 
@@ -177,6 +177,10 @@ Beyond the code, this prototype is positioned to address what the Registry evalu
 - **Open** — every line is open source; the MoH can fork and own its own destiny.
 
 ---
+
+## Documentation & change history
+
+The complete audit-facing documentation set lives in [`docs/`](docs/README.md) — start with the role-based reading paths in §7 of that index. User-visible changes between releases are recorded in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 

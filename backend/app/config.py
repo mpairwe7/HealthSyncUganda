@@ -42,6 +42,25 @@ class Settings(BaseSettings):
     database_pool_size: int = 10
     database_max_overflow: int = 20
 
+    # Schema bootstrap for dev/staging only. When true, the lifespan hook
+    # runs `Base.metadata.create_all` on startup — idempotent (only creates
+    # missing tables; never ALTERs existing ones). Defaults to False so
+    # production deploys must apply Alembic migrations explicitly
+    # (`uv run alembic upgrade head`). The dev `scripts/dev-stack.sh` and
+    # staging compose files set `AUTO_CREATE_SCHEMA=true` to keep first-
+    # deploy ergonomics. Setting this true in production is a config bug
+    # — main.py logs a WARNING at startup if it observes that combination.
+    auto_create_schema: bool = False
+
+    # Run `alembic upgrade head` on startup. Necessary on platforms (e.g.
+    # Crane Cloud) where there's no separate migration step in the deploy
+    # pipeline. The lifespan hook detects a DB bootstrapped via create_all
+    # (no `alembic_version` table) and stamps it at the last pre-Alembic
+    # revision before upgrading, so this is safe to enable on existing
+    # staging databases. Defaults False; staging / pilot turn it on
+    # through cranecloud env vars.
+    auto_migrate: bool = False
+
     # ── Redis ────────────────────────────────────────────────────────────
     redis_url: str = "redis://localhost:6379/0"
 

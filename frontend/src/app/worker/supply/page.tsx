@@ -1,15 +1,17 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { format } from "date-fns";
-import { AlertTriangle, ArrowRightLeft } from "lucide-react";
+import { AlertTriangle, ArrowRightLeft, PackagePlus, PillBottle, Send } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { OfflineBanner } from "@/components/ui/offline-banner";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -21,26 +23,29 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  useDispense,
   useFacilities,
   useStockSnapshot,
   useStockTransfer,
   useSupplyItems,
 } from "@/lib/api/hooks";
-import { useAuth } from "@/lib/store/auth";
+import { useAuth, useAuthHydrated } from "@/lib/store/auth";
 import { useUi } from "@/lib/store/ui";
 
 export default function SupplyPage() {
   const session = useAuth((s) => s.session);
+  const hydrated = useAuthHydrated();
   const router = useRouter();
   useEffect(() => {
-    if (!session) router.replace("/login");
-  }, [session, router]);
+    if (hydrated && !session) router.replace("/login");
+  }, [hydrated, session, router]);
 
   const [district, setDistrict] = useState<string | "">("");
   const snapshot = useStockSnapshot({ district: district || undefined });
   const items = useSupplyItems();
   const facilities = useFacilities();
   const transfer = useStockTransfer();
+  const dispense = useDispense();
   const pushToast = useUi((s) => s.pushToast);
 
   const [tFrom, setTFrom] = useState("");
@@ -48,6 +53,10 @@ export default function SupplyPage() {
   const [tItem, setTItem] = useState("");
   const [tQty, setTQty] = useState(50);
   const [tReason, setTReason] = useState("Replenishment");
+
+  const [dItem, setDItem] = useState("");
+  const [dQty, setDQty] = useState(1);
+  const [dPurpose, setDPurpose] = useState("medication-dispense");
 
   const districts = useMemo(
     () => Array.from(new Set((facilities.data ?? []).map((f) => f.district))).sort(),
@@ -73,12 +82,58 @@ export default function SupplyPage() {
     }
   }
 
+  async function doDispense() {
+    if (!session?.facility_id) {
+      pushToast({
+        kind: "error",
+        title: "No facility on session",
+        description: "Dispense requires a worker assigned to a facility.",
+      });
+      return;
+    }
+    try {
+      await dispense.mutateAsync({
+        supply_item_id: dItem,
+        facility_id: session.facility_id,
+        quantity: dQty,
+        purpose: dPurpose,
+      });
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        title: "Dispense failed",
+        description: (err as Error).message,
+      });
+    }
+  }
+
+  if (!hydrated || !session) return null;
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Supply</h1>
-        <p className="text-muted-foreground">Live facility-level stock with low-stock alerts.</p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Supply</h1>
+          <p className="text-muted-foreground">Live facility-level stock with low-stock alerts.</p>
+        </div>
+        <div className="flex gap-2">
+          <Link href="/worker/supply/receive">
+            <Button variant="outline" size="sm">
+              <PackagePlus className="mr-1.5 h-4 w-4" aria-hidden />
+              Receive stock
+            </Button>
+          </Link>
+          <Link href="/worker/supply/transfers">
+            <Button variant="outline" size="sm">
+              <Send className="mr-1.5 h-4 w-4" aria-hidden />
+              Transfer history
+            </Button>
+          </Link>
+        </div>
       </div>
+
+      <OfflineBanner />
+
 
       <div className="grid gap-6 lg:grid-cols-3">
         <Card className="lg:col-span-2">
@@ -207,6 +262,60 @@ export default function SupplyPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Dispense — pharmacist-only on the backend, but the UI is visible to
+          all workers so they can see what their pharmacy colleagues see. */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <PillBottle className="h-4 w-4" aria-hidden /> Dispense from this facility
+          </CardTitle>
+          <CardDescription>
+            FEFO drain across batches at <strong>{session.name ? session.name + " — " : ""}
+            this facility</strong>. Recorded in the hash-chained supply ledger and the audit log.
+            Pharmacist role required on the backend.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-3 sm:grid-cols-4">
+            <Field label="Item">
+              <Select value={dItem} onChange={(e) => setDItem(e.target.value)}>
+                <option value="">Select…</option>
+                {(items.data ?? []).map((it) => (
+                  <option key={it.id} value={it.id}>
+                    {it.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Quantity">
+              <Input
+                type="number"
+                min={1}
+                value={dQty}
+                onChange={(e) => setDQty(Number(e.target.value))}
+              />
+            </Field>
+            <Field label="Purpose">
+              <Select value={dPurpose} onChange={(e) => setDPurpose(e.target.value)}>
+                <option value="medication-dispense">Medication dispense</option>
+                <option value="vaccination">Vaccination</option>
+                <option value="wastage">Wastage / expiry write-off</option>
+                <option value="stock-correction">Stock correction</option>
+              </Select>
+            </Field>
+            <div className="flex items-end">
+              <Button
+                className="w-full"
+                disabled={!dItem || dQty < 1 || dispense.isPending || !session.facility_id}
+                onClick={doDispense}
+              >
+                {dispense.isPending ? "Dispensing…" : "Dispense"}
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

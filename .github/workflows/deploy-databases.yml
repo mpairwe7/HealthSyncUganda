@@ -1,0 +1,196 @@
+name: Deploy databases (postgres + redis)
+
+# One-shot workflow to provision the Postgres and Redis Crane Cloud apps for
+# a given environment. Separate from deploy-cranecloud.yml (which only ROLLS
+# the existing backend/frontend) because:
+#
+#   - Postgres and Redis are deployed ONCE per environment, then updated
+#     rarely (image bump only, not on every code change).
+#   - Their first-deploy returns APP_IDs that have to be persisted as
+#     env-scoped GitHub secrets before deploy-cranecloud.yml can touch
+#     backend/frontend.
+#   - The shell command for postgres requires POSTGRES_PASSWORD, which is
+#     a one-time-set secret; we don't want every backend-rollout to re-set it.
+#
+# Run this manually from the Actions tab. Inputs control which apps to
+# create + what passwords to use (or generate). After it completes, the
+# captured APP_IDs are echoed in the run summary so you can paste them into
+# the env secrets (CRANECLOUD_POSTGRES_APP_ID / CRANECLOUD_REDIS_APP_ID).
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Target environment"
+        type: choice
+        options: [staging, pilot, production]
+        default: staging
+        required: true
+      action:
+        description: "Action to perform"
+        type: choice
+        options:
+          - create-postgres
+          - create-redis
+          - create-both
+          - update-postgres-image
+          - update-redis-image
+        default: create-both
+        required: true
+      image_tag:
+        description: "Image tag for postgres (only used for create-postgres / create-both / update-postgres-image)"
+        type: string
+        default: "main"
+        required: false
+
+concurrency:
+  group: deploy-databases-${{ inputs.env }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-databases:
+    name: ${{ inputs.action }} (${{ inputs.env }})
+    runs-on: ubuntu-latest
+    environment:
+      name: cranecloud-${{ inputs.env }}
+    env:
+      PYTHON_KEYRING_BACKEND: keyrings.alt.file.PlaintextKeyring
+      DOCKERHUB_USER: ${{ vars.DOCKERHUB_USER || 'mpairwe7' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        run: |
+          set -euo pipefail
+          : "${CRANECLOUD_TOKEN:?CRANECLOUD_TOKEN env secret is missing}"
+          : "${CRANECLOUD_USER_ID:?CRANECLOUD_USER_ID env secret is missing}"
+          : "${CRANECLOUD_PROJECT_ID:?CRANECLOUD_PROJECT_ID env secret is missing}"
+        env:
+          CRANECLOUD_TOKEN:      ${{ secrets.CRANECLOUD_TOKEN }}
+          CRANECLOUD_USER_ID:    ${{ secrets.CRANECLOUD_USER_ID }}
+          CRANECLOUD_PROJECT_ID: ${{ secrets.CRANECLOUD_PROJECT_ID }}
+
+      - name: Set up Python + install cranecloud CLI
+        uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install
+        run: |
+          pip install --upgrade pip
+          pip install cranecloud || pip install crane-cloud-cli
+          pip install 'keyrings.alt'
+
+      - name: Seed cranecloud session
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.cranecloud
+          umask 077
+          printf '%s' "${CRANECLOUD_TOKEN}"   > ~/.cranecloud/token
+          printf '%s' "${CRANECLOUD_USER_ID}" > ~/.cranecloud/user_id
+          chmod 600 ~/.cranecloud/token ~/.cranecloud/user_id
+          cranecloud auth user >/dev/null
+        env:
+          CRANECLOUD_TOKEN:   ${{ secrets.CRANECLOUD_TOKEN }}
+          CRANECLOUD_USER_ID: ${{ secrets.CRANECLOUD_USER_ID }}
+
+      - name: Set project default
+        run: cranecloud projects use-project "${{ secrets.CRANECLOUD_PROJECT_ID }}"
+
+      - name: Create Postgres
+        id: pg_create
+        if: inputs.action == 'create-postgres' || inputs.action == 'create-both'
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${POSTGRES_PASSWORD:-}" ]; then
+            echo "::error::POSTGRES_PASSWORD env secret is missing. Set it via:"
+            echo "    gh secret set POSTGRES_PASSWORD --env cranecloud-${{ inputs.env }} --repo \$REPO"
+            exit 1
+          fi
+          # No docker.io/ prefix — cranecloud rejects it
+          IMAGE="${DOCKERHUB_USER}/healthsync-uganda-postgres:${{ inputs.image_tag }}"
+          cranecloud apps deploy \
+            --name "healthsync-postgres-${{ inputs.env }}" \
+            --image "$IMAGE" \
+            --port 5432 \
+            --replicas 1 \
+            -e "POSTGRES_USER=healthsync" \
+            -e "POSTGRES_PASSWORD=$POSTGRES_PASSWORD" \
+            -e "POSTGRES_DB=healthsync"
+          sleep 5
+          PG_ID=$(cranecloud apps list 2>&1 | awk -v n="healthsync-postgres-${{ inputs.env }}" '$2==n {print $1}')
+          echo "pg_id=$PG_ID" >> "$GITHUB_OUTPUT"
+          echo "::notice::Postgres created with APP_ID=$PG_ID — set CRANECLOUD_POSTGRES_APP_ID secret to this value"
+
+      - name: Create Redis
+        id: rd_create
+        if: inputs.action == 'create-redis' || inputs.action == 'create-both'
+        run: |
+          set -euo pipefail
+          cranecloud apps deploy \
+            --name "healthsync-redis-${{ inputs.env }}" \
+            --image "redis:7-alpine" \
+            --port 6379 \
+            --replicas 1
+          sleep 5
+          RD_ID=$(cranecloud apps list 2>&1 | awk -v n="healthsync-redis-${{ inputs.env }}" '$2==n {print $1}')
+          echo "rd_id=$RD_ID" >> "$GITHUB_OUTPUT"
+          echo "::notice::Redis created with APP_ID=$RD_ID — set CRANECLOUD_REDIS_APP_ID secret to this value"
+
+      - name: Update Postgres image (existing app)
+        if: inputs.action == 'update-postgres-image'
+        env:
+          CRANECLOUD_POSTGRES_APP_ID: ${{ secrets.CRANECLOUD_POSTGRES_APP_ID }}
+        run: |
+          : "${CRANECLOUD_POSTGRES_APP_ID:?Set CRANECLOUD_POSTGRES_APP_ID env secret first}"
+          IMAGE="${DOCKERHUB_USER}/healthsync-uganda-postgres:${{ inputs.image_tag }}"
+          cranecloud apps update "$CRANECLOUD_POSTGRES_APP_ID" --image "$IMAGE"
+
+      - name: Update Redis image (existing app)
+        if: inputs.action == 'update-redis-image'
+        env:
+          CRANECLOUD_REDIS_APP_ID: ${{ secrets.CRANECLOUD_REDIS_APP_ID }}
+        run: |
+          : "${CRANECLOUD_REDIS_APP_ID:?Set CRANECLOUD_REDIS_APP_ID env secret first}"
+          cranecloud apps update "$CRANECLOUD_REDIS_APP_ID" --image "redis:7-alpine"
+
+      - name: Summary
+        if: always()
+        env:
+          PG_ID: ${{ steps.pg_create.outputs.pg_id }}
+          RD_ID: ${{ steps.rd_create.outputs.rd_id }}
+        run: |
+          {
+            echo "## Database deploy — \`${{ inputs.env }}\`"
+            echo "| Field | Value |"
+            echo "| ----- | ----- |"
+            echo "| action     | \`${{ inputs.action }}\` |"
+            echo "| image_tag  | \`${{ inputs.image_tag }}\` |"
+            echo "| job status | \`${{ job.status }}\` |"
+            echo
+            if [ -n "$PG_ID" ]; then
+              echo "### Postgres APP_ID created"
+              echo
+              echo '```'
+              echo "gh secret set CRANECLOUD_POSTGRES_APP_ID --env cranecloud-${{ inputs.env }} --repo ${{ github.repository }} --body '$PG_ID'"
+              echo '```'
+            fi
+            if [ -n "$RD_ID" ]; then
+              echo "### Redis APP_ID created"
+              echo
+              echo '```'
+              echo "gh secret set CRANECLOUD_REDIS_APP_ID --env cranecloud-${{ inputs.env }} --repo ${{ github.repository }} --body '$RD_ID'"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup token
+        if: always()
+        run: |
+          shred -uz ~/.cranecloud/token   2>/dev/null || rm -f ~/.cranecloud/token
+          shred -uz ~/.cranecloud/user_id 2>/dev/null || rm -f ~/.cranecloud/user_id

@@ -9,6 +9,7 @@ import { Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { OfflineBanner } from "@/components/ui/offline-banner";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -19,17 +20,18 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { usePatients } from "@/lib/api/hooks";
-import { useAuth } from "@/lib/store/auth";
+import { useAuth, useAuthHydrated } from "@/lib/store/auth";
 
 export default function PatientsPage() {
   const session = useAuth((s) => s.session);
+  const hydrated = useAuthHydrated();
   const router = useRouter();
   const [q, setQ] = useState("");
   const [debounced, setDebounced] = useState("");
 
   useEffect(() => {
-    if (!session) router.replace("/login");
-  }, [session, router]);
+    if (hydrated && !session) router.replace("/login");
+  }, [hydrated, session, router]);
 
   useEffect(() => {
     const id = setTimeout(() => setDebounced(q.trim()), 250);
@@ -38,10 +40,11 @@ export default function PatientsPage() {
 
   const { data, isLoading } = usePatients({ q: debounced || undefined, page: 1 });
 
-  if (!session) return null;
+  if (!hydrated || !session) return null;
 
   return (
     <div className="space-y-6">
+      <OfflineBanner />
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Patients</h1>

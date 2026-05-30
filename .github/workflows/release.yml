@@ -1,0 +1,77 @@
+name: Release
+
+# Triggered when a `v*` tag is pushed. Generates a GitHub Release with the
+# matching CHANGELOG.md section as the body. Pairs with build-push.yml (which
+# also fires on v* and pushes the version-tagged images) and
+# deploy-cranecloud.yml (which deploys env=pilot on v* per the dispatch logic).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write    # required to create the Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # ensure tags + git log are available
+
+      - name: Extract CHANGELOG section for this version
+        id: changelog
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"           # e.g. v0.1.0-pre-pilot.3
+          VERSION_BARE="${VERSION#v}"            # 0.1.0-pre-pilot.3
+          # Match either ## [VERSION] or ## [VERSION_BARE] header, capture
+          # lines until the next ## header.
+          awk -v ver="$VERSION_BARE" '
+            $0 ~ "^## \\["ver"\\]"  { found=1; next }
+            found && /^## \[/        { exit }
+            found                    { print }
+          ' CHANGELOG.md > /tmp/section.md
+
+          if [ ! -s /tmp/section.md ]; then
+            echo "No CHANGELOG entry for [$VERSION_BARE]; falling back to git-log since previous tag"
+            PREV=$(git describe --tags --abbrev=0 "$VERSION^" 2>/dev/null || echo "")
+            if [ -n "$PREV" ]; then
+              git log --oneline "$PREV..$VERSION" > /tmp/section.md
+            else
+              git log --oneline                   > /tmp/section.md
+            fi
+          fi
+
+          {
+            echo "## Container images"
+            echo
+            echo "Built and pushed by [build-push.yml](../../.github/workflows/build-push.yml):"
+            echo
+            echo '```'
+            echo "${{ vars.DOCKERHUB_USER || 'mpairwe7' }}/healthsync-uganda-backend:${VERSION_BARE}"
+            echo "${{ vars.DOCKERHUB_USER || 'mpairwe7' }}/healthsync-uganda-frontend:${VERSION_BARE}"
+            echo "${{ vars.DOCKERHUB_USER || 'mpairwe7' }}/healthsync-uganda-postgres:${VERSION_BARE}"
+            echo '```'
+            echo
+            echo "## Changes"
+            echo
+            cat /tmp/section.md
+          } > /tmp/body.md
+
+          echo "version=$VERSION"          >> "$GITHUB_OUTPUT"
+          echo "body_path=/tmp/body.md"    >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION:  ${{ steps.changelog.outputs.version }}
+        run: |
+          set -euo pipefail
+          PRERELEASE=""
+          if [[ "$VERSION" == *-* ]]; then PRERELEASE="--prerelease"; fi
+          gh release create "$VERSION" \
+            --title "HealthSync Uganda $VERSION" \
+            --notes-file "${{ steps.changelog.outputs.body_path }}" \
+            $PRERELEASE

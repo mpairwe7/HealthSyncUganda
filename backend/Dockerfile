@@ -14,11 +14,18 @@ COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# Install deps first (better layer caching)
-COPY pyproject.toml ./
-RUN uv sync --no-dev
+# Install deps first (better layer caching). Copy the lock file alongside
+# pyproject.toml and pass --locked so the build fails fast if the lock drifts
+# — reproducible builds are a hard requirement for government deployments.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --no-dev --locked
 
 COPY app ./app
+# alembic.ini + the migrations directory are required by the AUTO_MIGRATE
+# lifespan hook in app/main.py — without these the container would crash on
+# startup when alembic tries to resolve its script_location.
+COPY alembic.ini ./alembic.ini
+COPY alembic ./alembic
 
 ENV PATH="/opt/venv/bin:${PATH}"
 
