@@ -111,6 +111,11 @@ jobs:
           provenance: false                       # keep the image SBOM simple for now; revisit at pre-pilot
           cache-from: type=gha,scope=${{ matrix.app }}
           cache-to: type=gha,mode=max,scope=${{ matrix.app }}
+          # Bake NEXT_PUBLIC_API_BASE_URL into the frontend bundle at build time.
+          # The variable is resolved from the repo variable STAGING_BACKEND_URL;
+          # the Dockerfile default covers local `docker build` without --build-arg.
+          build-args: |
+            ${{ matrix.app == 'frontend' && format('NEXT_PUBLIC_API_BASE_URL={0}', vars.STAGING_BACKEND_URL || 'https://healthsync-backend-staging-9b4ecff1.renu-01.cranecloud.io') || '' }}
 
       - name: Image summary
         run: |

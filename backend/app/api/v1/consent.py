@@ -95,6 +95,13 @@ async def revoke(
     c = await db.get(Consent, consent_id)
     if c is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Consent not found")
+    # Citizens may only revoke consents tied to their own patient record.
+    # Prior to this check, any valid citizen JWT could revoke any consent
+    # by guessing IDs — same guard pattern as list_for_patient above.
+    if principal.role == "citizen":
+        patient = await db.get(Patient, c.patient_id)
+        if patient is None or patient.nin != principal.subject:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your consent")
     if c.revoked_at is not None:
         return _to_out(c)
     c.revoked_at = datetime.now(UTC)

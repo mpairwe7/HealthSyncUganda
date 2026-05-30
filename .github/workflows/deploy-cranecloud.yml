@@ -99,25 +99,61 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install cranecloud CLI + keyrings.alt
+      - name: Install cranecloud CLI + keyrings.alt + keyring CLI
         run: |
           set -euo pipefail
           pip install --upgrade pip
           pip install cranecloud || pip install crane-cloud-cli
           # The null keyring backend silently drops writes; the file backend
-          # is in keyrings.alt and is the only one that works in non-tty CI.
-          pip install 'keyrings.alt'
-          which cranecloud
+          # in keyrings.alt is the only one that works in non-tty CI.
+          # `keyring` (the CLI) is needed to seed entries non-interactively.
+          pip install 'keyrings.alt' 'keyring'
+          which cranecloud keyring
           cranecloud --help | head -5
 
-      - name: Seed cranecloud token from secret
+      - name: Seed cranecloud session into the keyring backend
         run: |
           set -euo pipefail
+          # The cranecloud CLI reads its token via:
+          #   keyring.get_password('cranecloud', 'token')
+          # so writing ~/.cranecloud/token alone does nothing — the file is
+          # ignored by the CLI's get_token() helper.
+          #
+          # We have to put the secret INTO the file-backed keyring at the
+          # canonical path:
+          #   $XDG_DATA_HOME/python_keyring/keyring_pass.cfg
+          #
+          # We can't use `keyring set` (the CLI) because in non-tty mode it
+          # calls getpass.getpass(), which on the GitHub runner raises
+          # EOFError instead of falling through to stdin (regression in
+          # keyring 25+; verified on the workflow runs 2026-05-26 → 28).
+          # Use the Python API directly — it bypasses the CLI's input
+          # handling entirely. Tokens flow via env vars, never argv, so
+          # they don't end up in `ps` / shell history / step logs.
+          mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/python_keyring"
+          python - <<'PY'
+          import os
+          import keyring
+          token   = os.environ["CRANECLOUD_TOKEN"]
+          user_id = os.environ["CRANECLOUD_USER_ID"]
+          if not token or not user_id:
+              raise SystemExit("Token or user_id is empty — check env scope secrets.")
+          keyring.set_password("cranecloud", "token", token)
+          keyring.set_password("cranecloud", "user_id", user_id)
+          # Round-trip read to catch backend-misconfig early (the null
+          # backend silently drops writes — surface that here rather than
+          # in the next step).
+          assert keyring.get_password("cranecloud", "token") == token, "token round-trip failed"
+          assert keyring.get_password("cranecloud", "user_id") == user_id, "user_id round-trip failed"
+          PY
+
+          # The CLI also reads ~/.cranecloud/user_id directly for some
+          # subcommands (`projects use-project` etc) — write that too as a
+          # belt-and-braces fallback.
           mkdir -p ~/.cranecloud
           umask 077
-          printf '%s' "${CRANECLOUD_TOKEN}"   > ~/.cranecloud/token
           printf '%s' "${CRANECLOUD_USER_ID}" > ~/.cranecloud/user_id
-          chmod 600 ~/.cranecloud/token ~/.cranecloud/user_id
+          chmod 600 ~/.cranecloud/user_id
         env:
           CRANECLOUD_TOKEN:   ${{ secrets.CRANECLOUD_TOKEN }}
           CRANECLOUD_USER_ID: ${{ secrets.CRANECLOUD_USER_ID }}
@@ -126,11 +162,26 @@ jobs:
         id: verify
         run: |
           set -euo pipefail
+          # Sanity-check the keyring entry without printing its value.
+          if ! keyring get cranecloud token >/dev/null 2>&1; then
+            echo "::error::keyring read failed — the seed step did not stash 'cranecloud:token'."
+            echo "### ❌ Keyring seed failed (Crane Cloud token not retrievable)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           if ! cranecloud auth user >/tmp/auth.log 2>&1; then
             {
               echo "### ❌ Crane Cloud auth failed"
               echo
-              echo "The CLI couldn't read the seeded token even with the file keyring backend."
+              echo "Token is in the keyring, but the API rejected it. Most likely cause:"
+              echo "the secret has expired or been rotated. Refresh CRANECLOUD_TOKEN in"
+              echo "the cranecloud-${{ inputs.env }} environment (Settings → Environments)."
+              echo
+              echo "CLI output:"
+              echo '```'
+              # Redact anything that looks like a bearer token in the log
+              sed -E 's/(token|bearer)=[^ ]+/\1=REDACTED/Ig' /tmp/auth.log
+              echo '```'
+              echo
               echo "Fallback: deploy from an interactive shell."
               echo
               echo '```bash'
@@ -138,12 +189,13 @@ jobs:
               echo "make update-${{ inputs.target }} ENV=${{ inputs.env }}"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            cat /tmp/auth.log
+            sed -E 's/(token|bearer)=[^ ]+/\1=REDACTED/Ig' /tmp/auth.log
             exit 1
           fi
           # Extract the user's name into a step output (no secrets leaked)
           name=$(grep -E "^Name" /tmp/auth.log | awk -F '  +' '{print $2}')
           echo "actor=$name" >> "$GITHUB_OUTPUT"
+          echo "### ✅ Authenticated as $name" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Capture current image tags (for rollback)
         id: previous
@@ -173,7 +225,21 @@ jobs:
         run: |
           set -euo pipefail
           echo "→ Updating backend ($CRANECLOUD_BACKEND_APP_ID) to image: $IMAGE"
-          cranecloud apps update "$CRANECLOUD_BACKEND_APP_ID" --image "$IMAGE"
+          # AUTO_MIGRATE=true lets the backend run `alembic upgrade head`
+          # during lifespan startup — Crane Cloud has no separate migration
+          # step, so the application owns its own schema lifecycle. The hook
+          # detects pre-existing create_all-bootstrapped DBs and stamps
+          # them at the appropriate revision before upgrading. Safe to keep
+          # on across deploys (no-op when the DB is at head).
+          # AUTO_CREATE_SCHEMA must be FALSE on a managed-platform deploy:
+          # if it's left on alongside AUTO_MIGRATE, create_all races alembic
+          # and adds new columns before the migration runs, then A01 fails
+          # with DuplicateColumn. Explicit "=false" here overrides any
+          # historical env value that the cranecloud app accumulated.
+          cranecloud apps update "$CRANECLOUD_BACKEND_APP_ID" \
+            --image "$IMAGE" \
+            -e AUTO_MIGRATE=true \
+            -e AUTO_CREATE_SCHEMA=false
           # Grab the public URL for the health check + summary
           url=$(cranecloud apps info "$CRANECLOUD_BACKEND_APP_ID" 2>&1 | awk '/^Url/ {print $2}')
           echo "url=$url" >> "$GITHUB_OUTPUT"
@@ -201,16 +267,27 @@ jobs:
         run: |
           set -euo pipefail
           echo "→ Polling $URL/healthz for up to 6 minutes"
+          # Require 5 consecutive 200s — Crane Cloud's ingress flickers
+          # between old + new pods during rollout, so a single 200 is not
+          # enough to declare success. A non-200 resets the streak.
           ok=0
+          streak=0
+          STREAK_TARGET=5
           for i in $(seq 1 36); do
             code=$(curl -sk --max-time 8 -o /dev/null -w "%{http_code}" "$URL/healthz" || echo "000")
-            echo "  [$i/36] HTTP $code"
-            if [ "$code" = "200" ]; then ok=1; break; fi
+            if [ "$code" = "200" ]; then
+              streak=$((streak+1))
+              echo "  [$i/36] HTTP 200 — streak $streak/$STREAK_TARGET"
+              if [ $streak -ge $STREAK_TARGET ]; then ok=1; break; fi
+            else
+              streak=0
+              echo "  [$i/36] HTTP $code — streak reset"
+            fi
             sleep 10
           done
           if [ $ok -eq 1 ]; then
             echo "rolled_back=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Backend healthy at $URL/healthz"
+            echo "::notice::Backend healthy at $URL/healthz (after $STREAK_TARGET consecutive 200s)"
           else
             echo "::error::Backend /healthz did not reach 200 within 6 min — rolling back"
             if [ -n "$ROLLBACK_IMAGE" ] && [ "$ROLLBACK_IMAGE" != "$IMAGE" ]; then
@@ -239,16 +316,26 @@ jobs:
         run: |
           set -euo pipefail
           echo "→ Polling $URL/ for up to 6 minutes"
+          # Same streak-based stability check as the backend (see comment
+          # above) — guards against ingress flicker during pod rollover.
           ok=0
+          streak=0
+          STREAK_TARGET=5
           for i in $(seq 1 36); do
             code=$(curl -sk --max-time 8 -o /dev/null -w "%{http_code}" "$URL/" || echo "000")
-            echo "  [$i/36] HTTP $code"
-            if [ "$code" = "200" ]; then ok=1; break; fi
+            if [ "$code" = "200" ]; then
+              streak=$((streak+1))
+              echo "  [$i/36] HTTP 200 — streak $streak/$STREAK_TARGET"
+              if [ $streak -ge $STREAK_TARGET ]; then ok=1; break; fi
+            else
+              streak=0
+              echo "  [$i/36] HTTP $code — streak reset"
+            fi
             sleep 10
           done
           if [ $ok -eq 1 ]; then
             echo "rolled_back=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Frontend healthy at $URL"
+            echo "::notice::Frontend healthy at $URL (after $STREAK_TARGET consecutive 200s)"
           else
             echo "::error::Frontend / did not reach 200 within 6 min — rolling back"
             if [ -n "$ROLLBACK_IMAGE" ]; then
@@ -367,5 +454,12 @@ jobs:
       - name: Cleanup token
         if: always()
         run: |
+          # Clear both the legacy on-disk paths AND the keyring backend that
+          # the CLI actually reads from. `keyring del` returns non-zero if
+          # the entry doesn't exist — that's fine on a clean run.
+          keyring del cranecloud token 2>/dev/null || true
+          keyring del cranecloud user_id 2>/dev/null || true
+          KR="${XDG_DATA_HOME:-$HOME/.local/share}/python_keyring/keyring_pass.cfg"
+          shred -uz "$KR" 2>/dev/null || rm -f "$KR"
           shred -uz ~/.cranecloud/token   2>/dev/null || rm -f ~/.cranecloud/token
           shred -uz ~/.cranecloud/user_id 2>/dev/null || rm -f ~/.cranecloud/user_id

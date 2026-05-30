@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 import {
+  Baby,
   CalendarClock,
   ClipboardList,
   FileLock2,
@@ -14,18 +15,19 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useT } from "@/lib/i18n/provider";
-import { useAuth } from "@/lib/store/auth";
+import { useAuth, useAuthHydrated } from "@/lib/store/auth";
 
 export default function CitizenHomePage() {
   const session = useAuth((s) => s.session);
+  const hydrated = useAuthHydrated();
   const router = useRouter();
   const { t } = useT();
 
   useEffect(() => {
-    if (!session) router.replace("/citizen/login");
-  }, [session, router]);
+    if (hydrated && !session) router.replace("/citizen/login");
+  }, [hydrated, session, router]);
 
-  if (!session) return null;
+  if (!hydrated || !session) return null;
 
   return (
     <div className="space-y-6">
@@ -69,6 +71,13 @@ export default function CitizenHomePage() {
           title={t.citizenHome.tiles.facilities.title}
           description={t.citizenHome.tiles.facilities.desc}
           href="/citizen/facilities"
+          open={t.citizenHome.open}
+        />
+        <Tile
+          icon={<Baby className="h-5 w-5 text-primary" />}
+          title="My family"
+          description="See your children's immunisations and what's due."
+          href="/citizen/family"
           open={t.citizenHome.open}
         />
       </div>

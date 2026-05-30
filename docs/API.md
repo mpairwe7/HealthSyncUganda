@@ -134,46 +134,53 @@ The full list is in OpenAPI. The endpoints below are the ones a partner is most 
 
 | Method | Path                                              | Auth                  | Purpose                                                            |
 | ------ | ------------------------------------------------- | --------------------- | ------------------------------------------------------------------ |
-| GET    | `/api/v1/patients?q=&family=&nin=&page=&size=`    | worker+               | Paginated search.                                                  |
-| GET    | `/api/v1/patients/{id}`                           | worker+ with consent  | Full patient record.                                               |
-| POST   | `/api/v1/patients`                                | worker+               | Register a new patient. Idempotency-Key supported.                 |
-| PATCH  | `/api/v1/patients/{id}`                           | worker+ with consent  | Update demographics.                                               |
+| GET    | `/api/v1/patients?q=&district=&page=&page_size=`  | worker+               | Paginated search (NIN, name, phone — fuzzy).                       |
+| GET    | `/api/v1/patients/{id}`                           | worker+; citizen-self OR registered caregiver | Full patient record. Caregiver-aware permission added 8adb5eb. |
+| POST   | `/api/v1/patients`                                | worker+               | Register a new patient. Idempotency-Key auto-added.                |
+| PATCH  | `/api/v1/patients/{id}`                           | worker+               | Update demographics.                                               |
+| PATCH  | `/api/v1/patients/{id}/deceased`                  | worker+               | Reversible vital-status flag (audited).                            |
+| GET    | `/api/v1/patients/{id}/immunisation-status`       | worker+; citizen-self OR caregiver | Per-antigen status against the UNEPI schedule.        |
+| GET    | `/api/v1/patients/{id}/family[?direction=…]`      | worker+; citizen-self OR caregiver | Family graph (children OR caregivers OR both).        |
+| POST   | `/api/v1/patients/{id}/caregivers`                | worker+               | Link a caregiver (by NIN) to this patient. Idempotent.             |
+| DELETE | `/api/v1/patients/{id}/caregivers/{link_id}`      | worker+               | Unlink a caregiver.                                                |
 
 ### 5.3 Encounters (`backend/app/api/v1/encounters.py`)
 
 | Method | Path                                              | Auth      | Purpose                                                      |
 | ------ | ------------------------------------------------- | --------- | ------------------------------------------------------------ |
-| POST   | `/api/v1/encounters`                              | worker+   | Create encounter. Idempotency-Key strongly recommended.      |
-| GET    | `/api/v1/encounters?patient=&since=&until=`       | varies    | List encounters; citizens see only their own.                |
+| POST   | `/api/v1/encounters`                              | worker+   | Create encounter (with embedded observations).               |
+| GET    | `/api/v1/encounters/by-patient/{patient_id}`      | worker+   | List a patient's encounters (newest-first).                  |
+| POST   | `/api/v1/encounters/{id}/observations`            | worker+   | Append late-arriving observations to an existing encounter.  |
 
 ### 5.4 Consent (`backend/app/api/v1/consent.py`)
 
 | Method | Path                                              | Auth      | Purpose                                                      |
 | ------ | ------------------------------------------------- | --------- | ------------------------------------------------------------ |
-| GET    | `/api/v1/consents/by-patient/{patient_id}`        | varies    | List active consents.                                        |
-| POST   | `/api/v1/consents`                                | citizen   | Grant consent for a facility × category.                     |
-| POST   | `/api/v1/consents/{consent_id}/revoke`            | citizen   | Revoke. Effect is immediate.                                 |
+| GET    | `/api/v1/consents/by-patient/{patient_id}`        | citizen-self / worker+ | List consents (active + revoked).               |
+| POST   | `/api/v1/consents`                                | worker+   | Grant consent on behalf of a patient.                        |
+| POST   | `/api/v1/consents/{consent_id}/revoke`            | citizen-self / worker+ | Revoke (immediate, NIN-bridge check applied).   |
 
 ### 5.5 Supply chain (`backend/app/api/v1/supply.py`)
 
 | Method | Path                                                              | Auth                 | Purpose                                              |
 | ------ | ----------------------------------------------------------------- | -------------------- | ---------------------------------------------------- |
 | GET    | `/api/v1/supply/items`                                            | worker+              | Catalogue (EMHSLU-coded).                            |
-| GET    | `/api/v1/supply/by-facility/{id}`                                 | worker+              | On-hand quantities + thresholds.                     |
-| POST   | `/api/v1/supply/receipts`                                         | pharmacist+          | Record stock receipt. Ledger entry created.          |
-| POST   | `/api/v1/supply/transfers`                                        | pharmacist+          | Initiate transfer between facilities.                |
-| POST   | `/api/v1/supply/transfers/{id}/acknowledge`                       | pharmacist+ (recv)   | Receiving facility confirms receipt.                 |
-| POST   | `/api/v1/supply/dispense`                                         | pharmacist+          | Dispense to patient. Decrements stock.               |
+| POST   | `/api/v1/supply/items`                                            | ministry_admin       | Add a new item to the master catalogue.              |
+| POST   | `/api/v1/supply/batches`                                          | pharmacist+          | Record an inbound batch (lot, expiry, qty).          |
+| POST   | `/api/v1/supply/transfers`                                        | pharmacist+          | Initiate transfer (FEFO drain from source).          |
+| GET    | `/api/v1/supply/transfers?facility_id=&since_days=`               | worker+              | Transfer history.                                    |
+| GET    | `/api/v1/supply/snapshot?district=&only_below_threshold=`         | worker+              | Live on-hand quantities by facility.                 |
+| POST   | `/api/v1/supply/dispense?supply_item_id=&facility_id=&quantity=&patient_id=&purpose=` | pharmacist+ | Dispense; **audited per patient** since commit 82d4908. |
 | GET    | `/api/v1/supply/alerts/low-stock`                                 | worker+              | Items at/below threshold.                            |
-| GET    | `/api/v1/supply/ledger/verify`                                    | district_admin+      | Verify the hash chain end to end.                    |
 
 ### 5.6 Analytics (`backend/app/api/v1/analytics.py`)
 
 | Method | Path                                                              | Auth                 | Purpose                                              |
 | ------ | ----------------------------------------------------------------- | -------------------- | ---------------------------------------------------- |
-| GET    | `/api/v1/analytics/encounters-by-district?since_days=`            | district_admin+      | Bar chart data, Redis-cached 60 s.                   |
-| GET    | `/api/v1/analytics/immunisation-coverage?antigen=&since_days=`    | district_admin+      | Coverage per antigen × district.                     |
-| GET    | `/api/v1/analytics/stock-out-risk`                                | district_admin+      | Items at risk, weighted by burn-rate.                |
+| GET    | `/api/v1/analytics/encounters-by-district?since_days=`            | district_admin+      | National encounter counts, Redis-cached 60 s.        |
+| GET    | `/api/v1/analytics/encounters-by-facility?facility_id=&since_days=` | worker+            | Per-facility counts; auto-scopes to caller's facility for worker/pharmacist. |
+| GET    | `/api/v1/analytics/immunisation-coverage?since_days=`             | district_admin+      | Coverage per antigen × district.                     |
+| GET    | `/api/v1/analytics/stock-out-risk`                                | district_admin+      | Items at risk, ranked.                               |
 
 ### 5.7 Interoperability operations (`backend/app/api/v1/interop.py`)
 
@@ -190,6 +197,29 @@ The full list is in OpenAPI. The endpoints below are the ones a partner is most 
 | Method | Path                                                              | Auth      | Purpose                                                |
 | ------ | ----------------------------------------------------------------- | --------- | ------------------------------------------------------ |
 | GET    | `/api/v1/facilities?district=&level=`                             | any       | Browse the national facility list (HC II → NRH).       |
+
+### 5.9 Me — self-serve (`backend/app/api/v1/me.py`)
+
+Every endpoint in this section resolves the calling user from the JWT subject. Citizen tokens carry the NIN; staff tokens carry the user ULID. Every GET records itself in the audit log so a citizen visiting `/citizen/audit` immediately sees the read.
+
+| Method | Path                                  | Auth        | Purpose                                                                                |
+| ------ | ------------------------------------- | ----------- | -------------------------------------------------------------------------------------- |
+| GET    | `/api/v1/me`                          | citizen     | Own Patient record (NIN-bridge primitive every other `/me/*` endpoint shares).         |
+| GET    | `/api/v1/me/encounters`               | citizen     | Own encounter history, newest-first.                                                   |
+| GET    | `/api/v1/me/immunisations`            | citizen     | Own SNOMED-coded vaccine administrations.                                              |
+| GET    | `/api/v1/me/audit?since_days=N`       | citizen     | Own access log (1-365 day window).                                                     |
+| GET    | `/api/v1/me/family`                   | citizen     | Children the caller is registered as caregiver for, with overdue-antigen counts.       |
+| POST   | `/api/v1/me/consent/grant`            | citizen     | Citizen self-grant (scope + purpose). Narrower than worker `POST /consents`.           |
+| PATCH  | `/api/v1/me/profile`                  | citizen     | Update phone / email / sub_county / parish / village. NIN + names are NIRA-authoritative. |
+| GET    | `/api/v1/me/staff`                    | staff       | Own User profile + facility (the staff-side mirror of `/me`). Citizen tokens → 403.    |
+
+### 5.10 Auth (`backend/app/api/v1/auth.py`)
+
+| Method | Path                                  | Auth                  | Purpose                                                              |
+| ------ | ------------------------------------- | --------------------- | -------------------------------------------------------------------- |
+| POST   | `/api/v1/auth/login`                  | none                  | Staff login (username + password) — issues a JWT (8h TTL).           |
+| POST   | `/api/v1/auth/citizen/login`          | none                  | Citizen NIN + OTP login (NIRA stub in dev) — JWT (2h TTL).           |
+| POST   | `/api/v1/auth/seed-demo`              | none (blocked in prod) | One-shot demo seed: runs `Base.metadata.create_all` (idempotent) + populates facilities, patients, encounters, observations, audit log, transfers, caregiver links. |
 
 ---
 

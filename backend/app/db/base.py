@@ -10,6 +10,7 @@ from sqlalchemy import DateTime, MetaData, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import JSON, TypeDecorator
+from ulid import ULID
 
 # Postgres-quality conventions; portable to SQLite for laptop demos.
 naming_convention = {
@@ -57,10 +58,21 @@ class TimestampMixin:
 
 
 class IdMixin:
-    """ULID-as-string primary key — sortable, URL-safe, and DB-agnostic."""
+    """ULID-as-string primary key — sortable, URL-safe, and DB-agnostic.
+
+    Implementation note: prior versions used `str(uuid4())` as the default,
+    which produces 36-char strings (with hyphens). That overflowed the
+    String(26) column on Postgres with
+    `StringDataRightTruncationError: value too long for type character varying(26)`.
+    SQLite silently tolerated the overflow, which is why the bug only
+    surfaced when the backend was first deployed against Postgres on
+    Crane Cloud staging (2026-05-26). The fix uses python-ulid (already
+    a project dependency) so the default produces 26-char Crockford
+    base32 strings that match the column width exactly.
+    """
 
     id: Mapped[str] = mapped_column(
-        String(26), primary_key=True, default=lambda: str(uuid4())
+        String(26), primary_key=True, default=lambda: str(ULID())
     )
 
 
