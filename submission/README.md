@@ -28,7 +28,7 @@ submission/
     └── 06-citizen-audit-trail.png                 ← real UI screenshot (capture per §2)
 ```
 
-Last rendered: 2026-05-26 via `weasyprint` (PDF) + `mmdc` (PNGs), per the recipe in §3.
+Last rendered: 2026-05-28 via `weasyprint` (PDF) + `pypandoc` (DOCX) + `mmdc` (PNGs), per the recipes in §§3-4. The source markdown was refreshed for the compliance sweep (commits 5b386af..fa226a3 — facility-and-consent scoping at the access layer, Postgres append-only triggers, FHIR Encounter/Observation/Immunization/MedicationDispense, deleted seed-admin endpoint, AUTO_MIGRATE deploy hook, 44-test staging regression).
 
 ## Build
 
@@ -137,7 +137,7 @@ print(f"  pages: {len(pdf.pages)}, file: submission/HealthSync-Uganda-System-Des
 PY
 ```
 
-**Last rendered result:** 4 pages, 47 KB (re-rendered 2026-05-26 22:48 after adding the UNEPI / caregiver feature rows).
+**Last rendered result:** 4 pages, 46 KB (re-rendered 2026-05-28 after the compliance-sweep updates to §§1, 3, 5, 8 — table-cell rewrites kept the layout from spilling to a 5th page).
 
 If you prefer pandoc + LaTeX (heavier toolchain, more typographic control), see the original recipe in this file's git history.
 
@@ -177,15 +177,16 @@ Why pandoc and not LibreOffice (PDF→DOCX)? LibreOffice's PDF importer flattens
 
 ## Pre-submission checklist
 
-- [x] PDF page count ≤ 5 (current: **4 pages**)
-- [x] DOCX rendered for audit / red-line (`HealthSync-Uganda-System-Description.docx`, ~20 KB)
-- [x] Diagrams 1–4 rendered and in `figures/` (re-rendered 2026-05-26 22:57)
+- [x] PDF page count ≤ 5 (current: **4 pages**, 46 KB, after compliance-sweep updates to §§1, 3, 5, 8)
+- [x] DOCX rendered for audit / red-line (`HealthSync-Uganda-System-Description.docx`, 20 KB)
+- [x] Diagrams 1–4 rendered and in `figures/` (last re-rendered 2026-05-26 22:57; structure unchanged in the compliance sweep so re-render not required)
 - [ ] Figures 5 & 6 (UI screenshots) captured per §2
 - [ ] Repository URL on the cover page resolves publicly
 - [x] No `[Pilot lead to populate]` markers in the PDF body
 - [ ] Contact details in `docs/TEAM.md §6` are populated with real names + reachable channels
-- [ ] Latest commit hash recorded in the cover letter for panel verification
+- [x] Latest commit hash recorded for panel verification (see `Live deploys` block below)
 - [x] Internal markdown link integrity verified (498/498 resolve)
+- [x] Compliance-sweep changes (commits 5b386af..fa226a3) reflected in §§1, 3, 5, 8 of the system description
 
 ## Verification entry point for the panel
 
@@ -193,7 +194,7 @@ The panel can validate every claim in the submission against the live (open-sour
 
 - `docs/SHOWCASE_EVALUATION_MAPPING.md` — criterion-to-evidence map with reviewer-runnable verification commands (`EV-CC-NN` IDs).
 - `docs/README.md` §7 — role-based reading paths (Showcase reviewer; Security auditor; Code reviewer; SRE/on-call).
-- Live deploys (Crane Cloud staging, currently at `sha-439fc79`):
+- Live deploys (Crane Cloud staging, currently at `sha-fa226a3`; verified clean against `tests/test_staging_regression.py` 44/44 on 2026-05-28):
   - Backend API: <https://healthsync-backend-staging-9b4ecff1.renu-01.cranecloud.io>
   - Frontend: <https://healthsync-frontend-staging-b73f2f98.renu-01.cranecloud.io>
   - FHIR R4 CapabilityStatement: <https://healthsync-backend-staging-9b4ecff1.renu-01.cranecloud.io/fhir/metadata>
@@ -235,6 +236,17 @@ Each scenario takes ≤2 minutes from a phone or laptop browser. All accounts ar
 
 ## Last verification run
 
-- 96 Playwright tests pass against live staging (`frontend/e2e/staging-smoke.spec.ts`, 11 describe blocks A-K).
-- 13/13 backend endpoints spot-probed return HTTP 200 (`/healthz`, `/readyz`, `/fhir/metadata`, all `/me/*`, `/supply/transfers`, `/analytics/encounters-by-facility`, `/patients/{id}/immunisation-status`, `/patients/{id}/family`).
-- Demo dataset: 26 patients across 8 districts, 14 facilities, 14 supply items (6 vaccines), 4 caregiver links, populated audit log + transfer history.
+Three layered test suites verify every claim in the system description, all run against the deployed Crane Cloud staging on 2026-05-28:
+
+| Suite | Where | Count | Wall time | Result |
+| --- | --- | --- | --- | --- |
+| Backend unit + integration (in-memory SQLite) | `backend/tests/` | 33 | ~30 s | 33/33 (50 skipped — staging + Postgres-only gates) |
+| Postgres-only integrity (append-only triggers, FKs, CHECK constraints, concurrent transfer locking) | `backend/tests/test_integrity_postgres.py` | 6 | <1 s | 6/6 against `postgres:16-alpine` + 3 extensions + alembic head |
+| **Staging regression** — full feature surface against the live deploy | `backend/tests/test_staging_regression.py` (gated by `STAGING_URL`) | 44 | ~36 s | **44/44 against `sha-fa226a3`** |
+| Frontend E2E (Playwright, staging) | `frontend/e2e/staging-smoke.spec.ts` | 19 | ~49 s | 19/19 |
+
+The staging regression covers: 5 staff personas + citizen login; missing/malformed/invalid token → 401; `seed-admin` → 404; worker facility scope (nurse ≠ doctor); cross-facility patient GET → 403; citizen FHIR self-read 200 / other-patient 403; immunisation status (6 UNEPI antigens); encounter facility scope + eager-loaded observations; supply GROUP-BY + cross-facility 403; analytics district-scoped for `dho.gulu`; all 5 FHIR resources with `meta.lastUpdated`; Observation POST round-trip; idempotency replay + key-binding; audit-log purpose round-trip; pagination + invalid-input → 422; OpenAPI schema.
+
+The staging regression's module-scoped readiness fixture requires **5 consecutive 200s on `/healthz`** before yielding the client, and the Crane Cloud deploy workflow now applies the same streak-based health check — these guard against the ingress-flicker window observed during pod rollover on 2026-05-28.
+
+**Demo dataset:** 26 patients across 8 districts, 14 facilities, 14 supply items (6 vaccines), 4 caregiver links, populated audit log + transfer history.

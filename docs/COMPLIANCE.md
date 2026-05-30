@@ -28,7 +28,7 @@ This document maps every relevant section of Uganda's *Data Protection and Priva
 | s.24 | Right of access | Citizen portal `/citizen/records`; FHIR `Patient/{id}` self-read | `frontend/src/app/citizen/records/page.tsx` |
 | s.25 | Right to rectification | Worker-mediated correction with audit | `app/api/v1/patients.py:update_patient` |
 | s.26 | Right to erasure | Soft-delete + physical erasure gated by ministry-admin role; cascade to caches | Roadmapped — control gate exists, physical-erase script in `scripts/forget.sh` (Q3 2026) |
-| s.27 | Right to object / withdraw consent | `/api/v1/consents/{id}/revoke`; cache invalidation within 60 s | `app/api/v1/consent.py:revoke` |
+| s.27 | Right to object / withdraw consent | `/api/v1/consents/{id}/revoke` records the withdrawal AND `app/core/access.py:has_active_consent_for_worker` enforces it at the access layer — a worker/pharmacist read returns 403 once all of the patient's consents are revoked or expired. | `app/api/v1/consent.py:revoke`, `app/core/access.py` (see [ACCESS_CONTROL.md §3.1](./ACCESS_CONTROL.md#31-worker--pharmacist-consent-enforcement)) |
 | s.29 | Cross-border transfer | None in default; controlled in roadmap | `docs/DPIA.md §8` |
 | s.30 | Processing of special-category data | Highest-sensitivity clinical fields scoped for field-level encryption | `docs/DPIA.md §5 R10` |
 | s.31 | Statistical / research use | Analytics endpoints emit aggregates only; no row-level export | `app/api/v1/analytics.py` returns counts/sums only |
