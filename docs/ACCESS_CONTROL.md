@@ -1,8 +1,13 @@
 # Access Control
 
 **Audience:** security assessors, MoH/NITA-U reviewers verifying RBAC, engineers adding endpoints.
-**Source of truth:** `backend/app/core/security.py` (role hierarchy and `require_role`) + the `require_role(...)` lines in each `backend/app/api/v1/*.py` file. This document mirrors those files; the code wins on any conflict.
-**Last reviewed:** 2026-05-25.
+**Source of truth:**
+- `backend/app/core/security.py` — role hierarchy, `Principal` (now carries `district_id`), JWT issue/decode, `require_role`.
+- `backend/app/core/access.py` — canonical per-resource authorisation gate (`can_read_patient`, `can_read_encounter`, `patient_visibility_filter`, `has_active_consent_for_worker`). REST and FHIR routes both call into this module.
+- `require_role(...)` lines in each `backend/app/api/v1/*.py` file (minimum-role declarations per endpoint).
+
+This document mirrors those files; the code wins on any conflict.
+**Last reviewed:** 2026-05-28.
 
 This is the consolidated RBAC matrix for the platform. It exists so that:
 
@@ -22,15 +27,17 @@ citizen  <  worker  <  pharmacist  <  district_admin  <  ministry_admin
 
 `is_at_least(role)` returns true when the holder's role is *at or above* the requested level. So a `ministry_admin` satisfies `require_role("worker")`, and a `pharmacist` satisfies `require_role("pharmacist")` but not `require_role("district_admin")`.
 
-| Role             | Issued to                                          | Token TTL | Identifier (`Principal.subject`) | `facility_id` set? |
-| ---------------- | -------------------------------------------------- | --------- | -------------------------------- | ------------------ |
-| `citizen`        | Citizens, via NIN+OTP at `/auth/citizen/login`     | 2 h (per SECURITY.md) | NIN              | NULL               |
-| `worker`         | Nurses, clinical officers                          | 8 h       | username                         | YES                |
-| `pharmacist`     | Pharmacists, store-keepers                         | 8 h       | username                         | YES                |
-| `district_admin` | District health team                               | 8 h       | username                         | NULL               |
-| `ministry_admin` | MoH / NITA-U operators                             | 8 h       | username                         | NULL               |
+| Role             | Issued to                                          | Token TTL | Identifier (`Principal.subject`) | `facility_id` set? | `district_id` set? |
+| ---------------- | -------------------------------------------------- | --------- | -------------------------------- | ------------------ | ------------------ |
+| `citizen`        | Citizens, via NIN+OTP at `/auth/citizen/login`     | 2 h (per SECURITY.md) | NIN              | NULL               | NULL               |
+| `worker`         | Nurses, clinical officers                          | 8 h       | username                         | YES                | YES (derived)      |
+| `pharmacist`     | Pharmacists, store-keepers                         | 8 h       | username                         | YES                | YES (derived)      |
+| `district_admin` | District health team                               | 8 h       | username                         | YES (home facility) | YES (required)    |
+| `ministry_admin` | MoH / NITA-U operators                             | 8 h       | username                         | NULL               | NULL               |
 
-JWT claims (`security.py:issue_token`): `sub`, `role`, `facility_id`, `name`, `iat`, `exp`, `iss`. Signed HS256 with `SECRET_KEY`. Verification (`_decode_token`) hard-codes `algorithms=["HS256"]` and requires `sub`, `role`, `exp`, `iat` (PyJWT advisory note in [SECURITY.md](./SECURITY.md)).
+JWT claims (`security.py:issue_token`): `sub`, `role`, `facility_id`, **`district_id`**, `name`, `iat`, `exp`, `iss`. Signed HS256 with `SECRET_KEY`. Verification (`_decode_token`) hard-codes `algorithms=["HS256"]` and requires `sub`, `role`, `exp`, `iat` (PyJWT advisory note in [SECURITY.md](./SECURITY.md)).
+
+`district_id` is resolved at login time from `User.facility.district` (`auth.py:staff_login`) and embedded in the JWT so every request carries the district scope without re-querying. Tokens issued before this claim was added — "legacy tokens" — are treated as having `district_id = NULL`; see §3 for the fail-closed behaviour that protects against them being used to escalate scope.
 
 ---
 
@@ -70,36 +77,61 @@ Legend: ✅ = allowed; — = denied; ★ = self-scoped (citizens may access only
 
 ---
 
-## 3. Facility scoping
+## 3. Facility and district scoping (canonical authorisation gates)
 
-Role alone is not sufficient for clinical data — a `worker` is also scoped to their own facility. The scoping is enforced at the **application layer** in two places:
+Role alone is not sufficient for clinical data — every read+write goes through the per-resource gates in `backend/app/core/access.py`. The matrix below is the *single* authoritative statement of patient-level scope; REST `GET /patients/{id}` and FHIR `GET /fhir/Patient/{id}` both invoke `can_read_patient(...)` so there is no second policy to drift.
 
-1. **Implicit in the data model.** Endpoints that write (`POST /encounters`, `POST /supply/batches`, `POST /supply/dispense`) stamp `facility_id` from the caller's `Principal.facility_id`. There is no API path that lets a worker write into another facility's records.
-2. **Explicit in the query.** Read endpoints that surface facility-scoped data (stock snapshots, low-stock alerts) filter by `Principal.facility_id` server-side.
+| Role               | `can_read_patient(p)` returns true iff |
+| ------------------ | -------------------------------------- |
+| `ministry_admin`   | always |
+| `district_admin`   | `principal.district_id IS NOT NULL` **AND** `p.enrolling_district == principal.district_id`. Tokens without a district claim **fail closed** — they get nothing. |
+| `worker`, `pharmacist` | `principal.facility_id IS NOT NULL` **AND** active-consent check passes (see below) **AND** (`p.enrolling_facility_id == principal.facility_id` **OR** the patient has at least one prior encounter at the caller's facility). |
+| `citizen`          | `p.nin == principal.subject` **OR** a `CaregiverLink` row exists where `caregiver_id` resolves to `principal.subject`. |
+| any other role     | denied. |
 
-`district_admin` collapses the scope to a whole district (cross-facility within the district). `ministry_admin` is national-scope.
+### 3.1 Worker / pharmacist consent enforcement
 
-**Current gap (tracked):** the patient `GET /patients/{id}` endpoint does *not* facility-scope worker access. A worker at any facility can read any patient by ID. The compensating controls are: (a) every read is audit-logged with `actor_id`, `actor_facility_id`, and `purpose`; (b) anomalous cross-facility patterns trip the detection signals in [INCIDENT_RESPONSE.md §3 Phase B](./INCIDENT_RESPONSE.md#phase-b--detection--analysis). A migration to enforce facility-or-consent at read time is on the roadmap (no ADR yet).
+`has_active_consent_for_worker(principal, patient, db)` (in `app/core/access.py`) is called by `_worker_can_access_patient` before any facility check succeeds. The rule:
+
+- If the patient has **no `Consent` rows at all**, default-allow (facility-scope alone gates access — this matches the demo-data state and the pre-pilot DPPA s.10 "purpose of care" baseline).
+- If the patient has **at least one** `Consent` row, **at least one** must be active — i.e. `revoked_at IS NULL` **AND** (`expires_at IS NULL` **OR** `expires_at > now()`).
+- If every consent has been revoked or expired, the worker/pharmacist read returns 403 even when facility-scope would otherwise grant it. This realises DPPA s.27 right-to-withdraw at the *access* layer, not just at the *recording* layer.
+
+The check writes nothing — it's a pure read against the `consents` table — so it carries no audit cost beyond the surrounding `record_access` call.
+
+### 3.2 Other facility-scoping points
+
+1. **Implicit in the data model.** Write endpoints (`POST /encounters`, `POST /supply/batches`, `POST /supply/dispense`) stamp `facility_id` from the caller's `Principal.facility_id`. No API path lets a worker write into another facility's records.
+2. **Explicit in the SQL.** List endpoints that surface facility-scoped data (patient search, encounter list, stock snapshot) use `patient_visibility_filter(...)` or an analogous `WHERE facility_id = ...` clause server-side. The filter is applied at SQL level — never at Python row-iteration — so an N-row bundle never produces N authz queries.
+3. **`patient_visibility_filter` for `district_admin`** fails closed identically to `can_read_patient`: a legacy token without a district claim resolves to a sentinel `Patient.id == "__no_district__"` clause, which never matches.
+
+`district_admin` collapses scope to a whole district (cross-facility within the district). `ministry_admin` is national-scope.
 
 ---
 
 ## 4. Citizen-self rule
 
-Citizens authenticate via NIN+OTP. Their `Principal.subject` is their NIN. The rule is enforced in code:
+Citizens authenticate via NIN+OTP. Their `Principal.subject` is their NIN. The rule is enforced via the canonical gate:
 
 ```python
-# patients.py:118
-if principal.role == "citizen" and principal.subject != p.nin:
-    raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your record")
+# backend/app/core/access.py — _citizen_can_read_patient
+if patient.nin == principal.subject:
+    return True
+me = (await db.scalars(
+    select(Patient).where(Patient.nin == principal.subject)
+)).one_or_none()
+if me is None:
+    return False
+link = (await db.scalars(
+    select(CaregiverLink).where(
+        CaregiverLink.caregiver_id == me.id,
+        CaregiverLink.child_id == patient.id,
+    )
+)).one_or_none()
+return link is not None
 ```
 
-```python
-# consent.py:75
-if principal.role == "citizen":
-    patient = await db.get(Patient, patient_id)
-    if not patient or patient.nin != principal.subject:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your record")
-```
+`GET /api/v1/patients/{id}` and `GET /fhir/Patient/{id}` both call `can_read_patient(...)` which routes citizens through this branch — so the citizen-self rule is identical across REST and FHIR. The list endpoints use `patient_visibility_filter(...)` to express the same logic at SQL level (own NIN OR caregiver-linked child).
 
 Combined effect:
 
@@ -169,7 +201,9 @@ Backed by `ix_audit_log_resource (resource_type, resource_id)`.
 | Staff password               | `POST /auth/login`             | `username` + `password`      | Staff              | bcrypt verification (`security.py:verify_password`). Production should put Keycloak / Authentik in front. |
 | Citizen NIN+OTP              | `POST /auth/citizen/login`     | `nin` + `otp`                | Citizens           | Prototype OTP-stub; production swaps to NIRA OIDC. Contract (endpoint shape) does not change. Rate-limited per [SECURITY.md](./SECURITY.md). |
 | Bearer token                 | `Authorization: Bearer …`      | JWT from one of the above    | All authenticated  | HS256, hard-coded algorithm (CVE-2025-45768 advisory). |
-| Seed admin (internal)        | `POST /auth/seed-admin`        | env-gated                    | Bootstrap          | `include_in_schema=False`; documented in BACKEND_SETUP.md. |
+| Seed demo (internal)         | `POST /auth/seed-demo`         | env-gated; refused in `APP_ENV=production` | Bootstrap | `include_in_schema=False`; documented in BACKEND_SETUP.md. |
+
+The legacy `POST /auth/seed-admin` endpoint was removed during the 2026-05-28 compliance sweep — it created a `ministry_admin` with a weak hardcoded password and had no production guard. Recovery / first-bootstrap is handled by `seed-demo` (which writes the same admin record as part of the full demo dataset and is production-gated). See CHANGELOG `[Unreleased]` for the audit trail.
 
 No refresh tokens. Re-login is intentional for attended-workstation contexts (per [SECURITY.md](./SECURITY.md) §"Authentication & authorisation").
 
@@ -191,11 +225,12 @@ What changes when an IdP is wired in:
 
 What does **not** change:
 
-- The `Principal` shape (`subject`, `role`, `facility_id`, `name`).
+- The `Principal` shape (`subject`, `role`, `facility_id`, `district_id`, `name`).
 - The role hierarchy (`citizen < worker < pharmacist < district_admin < ministry_admin`).
 - The `require_role(...)` dependency at every endpoint.
+- The canonical access gates in `app/core/access.py` (`can_read_patient`, `can_read_encounter`, `patient_visibility_filter`, `has_active_consent_for_worker`).
 - The audit-log shape and `record_access` calls.
-- The facility-scoping rules in §3.
+- The facility-and-district-scoping rules in §3 (including the consent enforcement for worker/pharmacist).
 
 Endpoints do not need code changes when the IdP swaps. This is the design intent.
 

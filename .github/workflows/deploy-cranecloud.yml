@@ -231,9 +231,15 @@ jobs:
           # detects pre-existing create_all-bootstrapped DBs and stamps
           # them at the appropriate revision before upgrading. Safe to keep
           # on across deploys (no-op when the DB is at head).
+          # AUTO_CREATE_SCHEMA must be FALSE on a managed-platform deploy:
+          # if it's left on alongside AUTO_MIGRATE, create_all races alembic
+          # and adds new columns before the migration runs, then A01 fails
+          # with DuplicateColumn. Explicit "=false" here overrides any
+          # historical env value that the cranecloud app accumulated.
           cranecloud apps update "$CRANECLOUD_BACKEND_APP_ID" \
             --image "$IMAGE" \
-            -e AUTO_MIGRATE=true
+            -e AUTO_MIGRATE=true \
+            -e AUTO_CREATE_SCHEMA=false
           # Grab the public URL for the health check + summary
           url=$(cranecloud apps info "$CRANECLOUD_BACKEND_APP_ID" 2>&1 | awk '/^Url/ {print $2}')
           echo "url=$url" >> "$GITHUB_OUTPUT"
@@ -261,16 +267,27 @@ jobs:
         run: |
           set -euo pipefail
           echo "→ Polling $URL/healthz for up to 6 minutes"
+          # Require 5 consecutive 200s — Crane Cloud's ingress flickers
+          # between old + new pods during rollout, so a single 200 is not
+          # enough to declare success. A non-200 resets the streak.
           ok=0
+          streak=0
+          STREAK_TARGET=5
           for i in $(seq 1 36); do
             code=$(curl -sk --max-time 8 -o /dev/null -w "%{http_code}" "$URL/healthz" || echo "000")
-            echo "  [$i/36] HTTP $code"
-            if [ "$code" = "200" ]; then ok=1; break; fi
+            if [ "$code" = "200" ]; then
+              streak=$((streak+1))
+              echo "  [$i/36] HTTP 200 — streak $streak/$STREAK_TARGET"
+              if [ $streak -ge $STREAK_TARGET ]; then ok=1; break; fi
+            else
+              streak=0
+              echo "  [$i/36] HTTP $code — streak reset"
+            fi
             sleep 10
           done
           if [ $ok -eq 1 ]; then
             echo "rolled_back=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Backend healthy at $URL/healthz"
+            echo "::notice::Backend healthy at $URL/healthz (after $STREAK_TARGET consecutive 200s)"
           else
             echo "::error::Backend /healthz did not reach 200 within 6 min — rolling back"
             if [ -n "$ROLLBACK_IMAGE" ] && [ "$ROLLBACK_IMAGE" != "$IMAGE" ]; then
@@ -299,16 +316,26 @@ jobs:
         run: |
           set -euo pipefail
           echo "→ Polling $URL/ for up to 6 minutes"
+          # Same streak-based stability check as the backend (see comment
+          # above) — guards against ingress flicker during pod rollover.
           ok=0
+          streak=0
+          STREAK_TARGET=5
           for i in $(seq 1 36); do
             code=$(curl -sk --max-time 8 -o /dev/null -w "%{http_code}" "$URL/" || echo "000")
-            echo "  [$i/36] HTTP $code"
-            if [ "$code" = "200" ]; then ok=1; break; fi
+            if [ "$code" = "200" ]; then
+              streak=$((streak+1))
+              echo "  [$i/36] HTTP 200 — streak $streak/$STREAK_TARGET"
+              if [ $streak -ge $STREAK_TARGET ]; then ok=1; break; fi
+            else
+              streak=0
+              echo "  [$i/36] HTTP $code — streak reset"
+            fi
             sleep 10
           done
           if [ $ok -eq 1 ]; then
             echo "rolled_back=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Frontend healthy at $URL"
+            echo "::notice::Frontend healthy at $URL (after $STREAK_TARGET consecutive 200s)"
           else
             echo "::error::Frontend / did not reach 200 within 6 min — rolling back"
             if [ -n "$ROLLBACK_IMAGE" ]; then

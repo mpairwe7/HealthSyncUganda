@@ -24,11 +24,14 @@ Policy summary (read on Encounter):
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import Principal
 from app.db.models.caregiver import CaregiverLink
+from app.db.models.consent import Consent
 from app.db.models.encounter import Encounter
 from app.db.models.patient import Patient
 
@@ -44,16 +47,32 @@ async def can_read_patient(
     if role == "ministry_admin":
         return True
     if role == "district_admin":
-        # District admins see their district. If the JWT doesn't carry a
-        # district claim (legacy token), fall back to "any" — better than
-        # locking them out mid-session; the next login will populate it.
+        # Fail closed for legacy tokens without district claim.
         if principal.district_id is None:
-            return True
+            return False
         return patient.enrolling_district == principal.district_id
     if role in ("worker", "pharmacist"):
         return await _worker_can_access_patient(principal, patient, db)
     if role == "citizen":
         return await _citizen_can_read_patient(principal, patient, db)
+    return False
+
+
+async def has_active_consent_for_worker(
+    principal: Principal, patient: Patient, db: AsyncSession
+) -> bool:
+    """Verify that if the patient has any consent records, at least one is active.
+    If they have no consent records at all, we default to allowing facility-scoped access.
+    """
+    now = datetime.now(UTC)
+    stmt = select(Consent).where(Consent.patient_id == patient.id)
+    all_consents = (await db.scalars(stmt)).all()
+    if not all_consents:
+        return True
+    for c in all_consents:
+        if c.revoked_at is None:
+            if c.expires_at is None or c.expires_at > now:
+                return True
     return False
 
 
@@ -66,6 +85,11 @@ async def _worker_can_access_patient(
     """
     if principal.facility_id is None:
         return False
+    
+    # Enforce active consent check
+    if not await has_active_consent_for_worker(principal, patient, db):
+        return False
+
     if patient.enrolling_facility_id == principal.facility_id:
         return True
     # Cross-facility referral path: if the patient has any encounter at the
@@ -147,7 +171,7 @@ def patient_visibility_filter(principal: Principal):
         return []
     if role == "district_admin":
         if principal.district_id is None:
-            return []
+            return [Patient.id == "__no_district__"]
         return [Patient.enrolling_district == principal.district_id]
     if role in ("worker", "pharmacist"):
         if principal.facility_id is None:
