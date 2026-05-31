@@ -146,6 +146,37 @@ def _check_production_secrets(settings: Settings) -> None:
         )
 
 
+_EXTENSION_DDL = (
+    'CREATE EXTENSION IF NOT EXISTS "pgcrypto"',   # gen_random_uuid()
+    'CREATE EXTENSION IF NOT EXISTS "pg_trgm"',    # trigram name search
+    'CREATE EXTENSION IF NOT EXISTS "btree_gin"',  # composite GIN indexes
+)
+
+
+async def _ensure_postgres_extensions() -> None:
+    """Create the Postgres extensions the schema depends on (idempotent).
+
+    Self-hosted Postgres gets these from infra/postgres/init.sql (baked into the
+    image, mounted by docker-compose). Managed Postgres (Crane Cloud DaaS) never
+    runs that init script, so the app creates them itself before the schema
+    bootstrap builds the pg_trgm GIN index. No-op on SQLite (laptop demos).
+
+    pgcrypto / pg_trgm / btree_gin are PG13+ "trusted" extensions, creatable by
+    any role with CREATE on the database — so the app's own DB user can run this
+    on a managed instance. If your DaaS restricts it, pre-create them once as an
+    admin; `IF NOT EXISTS` makes this a no-op thereafter.
+    """
+    from sqlalchemy import text
+
+    engine = get_engine()
+    if engine.dialect.name != "postgresql":
+        return
+    async with engine.begin() as conn:
+        for ddl in _EXTENSION_DDL:
+            await conn.execute(text(ddl))
+    logger.info("schema.extensions_ready")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
@@ -155,6 +186,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Fail fast if a non-local deployment is still on placeholder secrets —
     # forgeable JWTs are worse than a failed boot.
     _check_production_secrets(settings)
+
+    # Create required Postgres extensions before any schema bootstrap. On
+    # managed Postgres (Crane Cloud DaaS) the image's init.sql never runs, so
+    # the pg_trgm GIN index would fail without this. No-op on SQLite.
+    await _ensure_postgres_extensions()
 
     # Auto-create schema bootstrap. Default-off in production: prod deploys
     # must run `alembic upgrade head` explicitly so column-level changes

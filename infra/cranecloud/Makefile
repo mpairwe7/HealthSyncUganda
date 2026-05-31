@@ -31,8 +31,8 @@ else
   C_RESET  :=
 endif
 
-.PHONY: help init env-check deploy deploy-postgres deploy-redis deploy-backend deploy-frontend \
-        update-postgres update-redis update-backend update-frontend list info logout clean
+.PHONY: help init env-check deploy deploy-redis deploy-backend deploy-frontend \
+        update-redis update-backend update-frontend list info logout clean
 
 help:  ## Show this help (default target)
 	@echo "$(C_BLUE)HealthSync Uganda — Crane Cloud deploy$(C_RESET)"
@@ -74,7 +74,7 @@ env-check:  ## Verify the env file exists and is readable
 	fi
 	@printf "$(C_GREEN)✓$(C_RESET) $(ENV_FILE) present\n"
 
-deploy: env-check deploy-postgres deploy-redis deploy-backend deploy-frontend  ## Deploy postgres + redis + backend + frontend
+deploy: env-check deploy-redis deploy-backend deploy-frontend  ## Deploy redis + backend + frontend (Postgres is the managed DaaS — provision it first, see README §0)
 	@printf "$(C_GREEN)✓$(C_RESET) Deploy complete for ENV=$(ENV)\n"
 	@printf "Capture the returned APP_IDs above into $(ENV_FILE) as\n"
 	@printf "  POSTGRES_APP_ID=<uuid>\n  REDIS_APP_ID=<uuid>\n  BACKEND_APP_ID=<uuid>\n  FRONTEND_APP_ID=<uuid>\n"
