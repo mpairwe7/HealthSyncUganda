@@ -9,7 +9,7 @@ authors = [{ name = "HealthSync Uganda Team" }]
 
 dependencies = [
     # Web framework
-    "fastapi[standard]>=0.115.0",
+    "fastapi[standard]>=0.136.3",
     "uvicorn[standard]>=0.48.0",
     # Validation
     "pydantic>=2.9.0",
