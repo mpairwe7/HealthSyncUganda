@@ -60,7 +60,7 @@ jobs:
     name: ${{ matrix.app }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -79,7 +79,7 @@ jobs:
       #   - latest (only on a non-pre-release v* tag)
       - name: Extract image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           # Docker Hub images do not need the `docker.io/` prefix in the
           # canonical name, but we keep it for clarity in the env files.
@@ -100,7 +100,7 @@ jobs:
 
       - name: Build & push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
