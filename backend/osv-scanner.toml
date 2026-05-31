@@ -1,0 +1,15 @@
+# OSV-Scanner configuration for backend/uv.lock.
+# https://google.github.io/osv-scanner/configuration/
+#
+# The CI dependency-audit job (.github/workflows/ci.yml) treats OSV findings as
+# blocking. Entries below are deliberate, justified suppressions — keep the list
+# short and revisit each on every dependency bump.
+
+[[IgnoredVulns]]
+id = "GHSA-6w46-j5rx-g56g"
+# pytest is a dev/test-only dependency (declared under [dependency-groups] dev,
+# never installed into the runtime image, which is built with `uv sync --no-dev`).
+# The fix (pytest 9.0.3) requires pytest-asyncio 1.x, which hangs this anyio-based
+# suite — pytest-asyncio is pinned <1 for that reason. Revisit when the suite is
+# migrated to pytest-asyncio 1.x.
+reason = "pytest is dev-only (not in the runtime image); the 9.0.3 fix needs pytest-asyncio 1.x which hangs the suite. Tracked."
