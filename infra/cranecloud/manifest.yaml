@@ -68,18 +68,15 @@ project:
 
 apps:
 
-  # ── PostgreSQL ─────────────────────────────────────────────────────────
-  postgres:
-    name: healthsync-postgres
-    image: docker.io/mpairwe7/healthsync-uganda-postgres
-    image_tag: main                            # tracks main branch; pin to v* in production
-    port: 5432
-    replicas: 1                                # NO HA — Crane Cloud apps don't support clustering today
-
-    env:
-      - POSTGRES_USER                          # default: healthsync
-      - POSTGRES_PASSWORD                      # 32+ char random; rotate per SECURITY.md
-      - POSTGRES_DB                            # default: healthsync
+  # ── PostgreSQL — managed (Crane Cloud DaaS), NOT a Crane Cloud app ──────
+  # Postgres is the Crane Cloud *managed* database (durable, platform-managed
+  # storage). It is provisioned out-of-band via the web UI
+  # (Project → Databases → + New Database → PostgreSQL → Create) and is
+  # therefore NOT deployed as an app from this manifest. The backend reaches it
+  # via DATABASE_URL (set in environments/<env>.env). The required extensions
+  # (pgcrypto / pg_trgm / btree_gin) are created by the app at startup
+  # (backend/app/main.py _ensure_postgres_extensions), so no custom image or
+  # init.sql is needed on the server.
 
   # ── Redis ──────────────────────────────────────────────────────────────
   redis:

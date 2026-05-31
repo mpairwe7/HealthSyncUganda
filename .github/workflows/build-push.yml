@@ -52,10 +52,10 @@ jobs:
             context: frontend
             dockerfile: frontend/Dockerfile
             image_suffix: healthsync-uganda-frontend
-          - app: postgres
-            context: infra/postgres
-            dockerfile: infra/postgres/Dockerfile
-            image_suffix: healthsync-uganda-postgres
+          # postgres image retired — Crane Cloud now uses managed Postgres
+          # (DaaS), which provides the server. Required extensions are created
+          # by the app at startup (backend/app/main.py _ensure_postgres_extensions).
+          # infra/postgres/init.sql is still used by local docker-compose.
 
     name: ${{ matrix.app }}
     steps:

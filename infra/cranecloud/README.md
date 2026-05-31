@@ -26,24 +26,19 @@ A HealthSync deployment occupies **one Crane Cloud project** per environment, wi
 
 | Component | How it lives on Crane Cloud | Image / source | Notes |
 | --- | --- | --- | --- |
-| **PostgreSQL** | Crane Cloud app — `cranecloud apps deploy` | `docker.io/mpairwe7/healthsync-uganda-postgres:<tag>` (custom image: `postgres:16-alpine` + baked-in `init.sql` for pgcrypto / pg_trgm / btree_gin) | **Self-hosted, not DaaS** — see §0.1 below for the durability trade-off and §0.2 for the DaaS fallback. |
+| **PostgreSQL** | **Crane Cloud managed DaaS** (Project → Databases → + New Database → PostgreSQL) — *not* a Crane Cloud app | Managed by the platform | **Durable, platform-managed storage.** The backend connects via `DATABASE_URL`; it creates the `pgcrypto` / `pg_trgm` / `btree_gin` extensions itself at startup (`backend/app/main.py _ensure_postgres_extensions`), so no custom image or `init.sql` is needed on the server. |
 | **Redis** | Crane Cloud app — `cranecloud apps deploy` | `redis:7-alpine` (Docker Hub) | Deployed with `--requirepass` + 256 MB cap + LRU eviction. |
 | **Backend (FastAPI)** | Crane Cloud app | `docker.io/mpairwe7/healthsync-uganda-backend:<tag>` | Built and pushed by `.github/workflows/build-push.yml`. |
 | **Frontend (Next.js)** | Crane Cloud app | `docker.io/mpairwe7/healthsync-uganda-frontend:<tag>` | Built and pushed by the same workflow. |
 | OpenTelemetry collector | Optional external — point `OTEL_EXPORTER_OTLP_ENDPOINT` at any OTLP receiver. Leave blank to disable. | — | Not part of the Crane Cloud project. |
 
-The `make deploy ENV=<env>` target deploys all four Crane Cloud apps in order: **postgres → redis → backend → frontend**. The backend/frontend depend on postgres + redis being reachable; the chain order matters.
+The `make deploy ENV=<env>` target deploys the three Crane Cloud apps in order: **redis → backend → frontend**. Postgres is the managed DaaS — provision it first (Project → Databases) and set `DATABASE_URL` in `environments/<env>.env` before `deploy-backend`. The backend/frontend depend on the DaaS + redis being reachable; the chain order matters.
 
-### 0.1 Persistence caveat for self-hosted DB & cache (READ BEFORE DEPLOY)
+### 0.1 Persistence: Postgres is durable (DaaS); Redis is ephemeral
 
-Crane Cloud's public documentation (as of 2026-05-25, [docs.cranecloud.io](https://docs.cranecloud.io/)) does not document persistent volumes for app containers. We therefore treat both `postgres` and `redis` as **ephemeral** — any pod restart resets state to the image's initial state.
+**Postgres** is the Crane Cloud managed DaaS — durable, platform-managed storage — so the old self-hosted "pod restart = data loss" risk no longer applies to the database. (Still run scheduled `pg_dump` backups per [`docs/BACKUP_RESTORE.md`](../../docs/BACKUP_RESTORE.md) for point-in-time recovery and an off-platform copy.)
 
-For **Postgres**, ephemerality is severe:
-
-- A pod restart drops every patient record, encounter, observation, consent grant, audit-log row, and supply ledger entry created since the last `pg_dump`.
-- For a health-records system this is **unacceptable in production** without persistent storage.
-
-For **Redis**, ephemerality is bounded:
+**Redis** remains a Crane Cloud app, and Crane Cloud does not document persistent volumes for app containers, so treat Redis as **ephemeral** — any pod restart resets it. This is bounded:
 
 | Redis-resident state | Rebuildable after restart? |
 | --- | --- |
