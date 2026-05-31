@@ -42,7 +42,9 @@ jobs:
         continue-on-error: true  # mypy strict baseline is in progress; CI surfaces issues without failing yet
 
       - name: Tests (pytest)
-        run: uv run pytest -q --tb=short
+        # -n auto parallelizes the seed-heavy integration suite across cores
+        # (tests are isolated — fresh in-memory SQLite per test).
+        run: uv run pytest -n auto -q --tb=short
 
   frontend:
     name: Frontend (Bun)
