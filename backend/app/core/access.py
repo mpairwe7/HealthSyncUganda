@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import Principal
@@ -74,6 +74,30 @@ async def has_active_consent_for_worker(
             if c.expires_at is None or c.expires_at > now:
                 return True
     return False
+
+
+def _consent_allows_clause(now: datetime) -> ColumnElement[bool]:
+    """SQL predicate mirroring `has_active_consent_for_worker`, for use in the
+    list/search visibility filter.
+
+    Allow the row when the patient has *no* consent records at all, OR has at
+    least one record that is currently active (not revoked, not expired). Kept
+    in lockstep with the per-row `has_active_consent_for_worker` above so the
+    single-record and search/bundle paths can't drift — that drift was exactly
+    the C3 bypass (consent enforced on GET /{id} but not on search or the FHIR
+    bundle, which only applied the SQL scope filter).
+    """
+    any_consent = select(Consent.id).where(Consent.patient_id == Patient.id).exists()
+    active_consent = (
+        select(Consent.id)
+        .where(
+            Consent.patient_id == Patient.id,
+            Consent.revoked_at.is_(None),
+            or_(Consent.expires_at.is_(None), Consent.expires_at > now),
+        )
+        .exists()
+    )
+    return or_(not_(any_consent), active_consent)
 
 
 async def _worker_can_access_patient(
@@ -144,12 +168,22 @@ async def can_read_encounter(
     if role == "ministry_admin":
         return True
     if role == "district_admin":
+        # Fail closed for legacy/misissued tokens without a district claim,
+        # mirroring can_read_patient. This path previously returned True (fail
+        # OPEN), letting such a token read any encounter nationwide.
         if principal.district_id is None:
-            return True
+            return False
         patient = await db.get(Patient, encounter.patient_id)
         return patient is not None and patient.enrolling_district == principal.district_id
     if role in ("worker", "pharmacist"):
-        return encounter.facility_id == principal.facility_id
+        if encounter.facility_id != principal.facility_id:
+            return False
+        # Apply the same consent gate as patient reads: a revoked consent must
+        # withhold the encounter detail too, not just the patient summary.
+        patient = await db.get(Patient, encounter.patient_id)
+        if patient is None:
+            return False
+        return await has_active_consent_for_worker(principal, patient, db)
     if role == "citizen":
         patient = await db.get(Patient, encounter.patient_id)
         if patient is None:
@@ -178,14 +212,18 @@ def patient_visibility_filter(principal: Principal):
             # No facility → no patients visible (instead of "all", which
             # would be a silent escalation).
             return [Patient.id == "__no_facility__"]
-        # enrolled here OR has an encounter here
+        # enrolled here OR has an encounter here, AND consent still permits the
+        # read. The consent clause closes the C3 search/bundle bypass: without
+        # it, a worker blocked from GET /patients/{id} by a revoked consent
+        # could still find the same patient via search or the FHIR bundle.
         return [
             (Patient.enrolling_facility_id == principal.facility_id)
             | Patient.id.in_(
                 select(Encounter.patient_id).where(
                     Encounter.facility_id == principal.facility_id
                 )
-            )
+            ),
+            _consent_allows_clause(datetime.now(UTC)),
         ]
     if role == "citizen":
         # own record OR ones linked via CaregiverLink resolved by NIN

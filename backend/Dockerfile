@@ -29,9 +29,24 @@ COPY alembic ./alembic
 
 ENV PATH="/opt/venv/bin:${PATH}"
 
+# Run as an unprivileged user. Created after deps + app are in place so the
+# venv and app tree can be chown'd to it.
+RUN useradd --system --create-home --uid 1001 appuser \
+    && chown -R appuser:appuser /app /opt/venv
+USER appuser
+
 EXPOSE 8000
 
 # Honour SIGTERM quickly so Kubernetes / Compose can roll updates.
 STOPSIGNAL SIGTERM
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status == 200 else 1)"
+
+# X-Forwarded-* headers are trusted only from these source IPs
+# (uvicorn --forwarded-allow-ips). Defaults to "*" to preserve single-proxy
+# PaaS behaviour, but that lets a client spoof X-Forwarded-For (evading the
+# IP-keyed rate limiter and forging logged client IPs). In production set
+# FORWARDED_ALLOW_IPS to the ingress IP/CIDR so forwarded IPs can be trusted.
+ENV FORWARDED_ALLOW_IPS=*
+CMD ["/bin/sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips \"$FORWARDED_ALLOW_IPS\""]

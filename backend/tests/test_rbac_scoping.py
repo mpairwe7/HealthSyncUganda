@@ -218,3 +218,65 @@ async def test_idempotency_replay_returns_cached_body(client) -> None:
             "Without an idempotency replay, the second POST must reject as a "
             f"duplicate; got {res2.status_code}: {res2.text}"
         )
+
+
+async def test_revoked_consent_hides_patient_from_search_and_fhir(client) -> None:
+    """C3 regression: consent revocation must withhold the patient on EVERY
+    worker path, not just GET /patients/{id}.
+
+    Before the fix, REST search and the FHIR Patient bundle bypassed the consent
+    gate — they applied only the SQL visibility filter, which had no consent
+    predicate. After revoking the patient's only active consent the worker must
+    lose access via direct read, REST search, AND the FHIR bundle.
+    """
+    await _seed(client)
+    nurse_token = await _login(client, "nurse.gulu", "demo1234")
+    h = {"Authorization": f"Bearer {nurse_token}"}
+
+    # A patient the nurse can currently read (seed grants an active consent).
+    res = await client.get("/api/v1/patients", params={"page_size": 50}, headers=h)
+    assert res.status_code == 200, res.text
+    items = res.json()["items"]
+    target = None
+    for it in items:
+        r = await client.get(f"/api/v1/patients/{it['id']}", headers=h)
+        if r.status_code == 200:
+            target = it
+            break
+    assert target is not None, "nurse must be able to read at least one patient"
+    tid, fam = target["id"], target["family_name"]
+
+    # Sanity — visible in REST search and the FHIR bundle before revocation.
+    assert any(p["id"] == tid for p in items)
+    fhir = await client.get("/fhir/Patient", params={"family": fam}, headers=h)
+    assert fhir.status_code == 200, fhir.text
+    assert any(
+        e["fullUrl"].endswith(f"/{tid}") for e in fhir.json().get("entry", [])
+    ), "target should appear in the FHIR bundle before revocation"
+
+    # Revoke every active consent the patient has.
+    cons = await client.get(f"/api/v1/consents/by-patient/{tid}", headers=h)
+    assert cons.status_code == 200, cons.text
+    active = [c["id"] for c in cons.json() if c["revoked_at"] is None]
+    assert active, "seed grants each patient an active consent"
+    for cid in active:
+        rv = await client.post(f"/api/v1/consents/{cid}/revoke", headers=h)
+        assert rv.status_code == 200, rv.text
+
+    # 1) Direct read → 403.
+    r = await client.get(f"/api/v1/patients/{tid}", headers=h)
+    assert r.status_code == 403, f"direct read must 403 after revoke; got {r.text}"
+
+    # 2) REST search must exclude the patient (the headline bypass).
+    res2 = await client.get("/api/v1/patients", params={"page_size": 50}, headers=h)
+    assert res2.status_code == 200
+    assert all(p["id"] != tid for p in res2.json()["items"]), (
+        "revoked-consent patient must not appear in worker search"
+    )
+
+    # 3) FHIR Patient bundle must exclude the patient.
+    fhir2 = await client.get("/fhir/Patient", params={"family": fam}, headers=h)
+    assert fhir2.status_code == 200
+    assert all(
+        not e["fullUrl"].endswith(f"/{tid}") for e in fhir2.json().get("entry", [])
+    ), "revoked-consent patient must not appear in the FHIR bundle"

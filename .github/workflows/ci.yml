@@ -87,7 +87,6 @@ jobs:
             --lockfile=backend/uv.lock
             --lockfile=frontend/bun.lock
             --recursive
-        continue-on-error: true  # Don't fail PR on transient advisory feed issues; alerts surface in checks
 
   # Verify the Dockerfiles still build on every PR. We do not push here —
   # the GHCR push happens in build-push.yml only on main and v* tags.

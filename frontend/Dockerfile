@@ -30,5 +30,16 @@ COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
+
+# Drop to an unprivileged user (distinct name to avoid colliding with the
+# image's built-in `bun` user).
+RUN addgroup -S appgroup && adduser -S -G appgroup appuser \
+    && chown -R appuser:appgroup /app
+USER appuser
+
 EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || exit 1
+
 CMD ["bun", "run", "start"]
