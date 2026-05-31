@@ -31,8 +31,13 @@
     "clsx": "^2.1.1",
     "tailwind-merge": "^2.6.0",
     "tailwindcss-animate": "^1.0.7",
+<<<<<<< HEAD
+    "lucide-react": "^0.469.0",
+    "recharts": "^3.8.1",
+=======
     "lucide-react": "^1.16.0",
     "recharts": "^2.15.0",
+>>>>>>> origin/main
     "date-fns": "^4.1.0",
     "zod": "^4.4.3"
   },
