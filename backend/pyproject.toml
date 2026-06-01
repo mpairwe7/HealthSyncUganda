@@ -27,7 +27,7 @@ dependencies = [
     # when AUTO_MIGRATE=true (see app/main.py).
     "psycopg[binary]>=3.2.0",
     # Cache / queue / idempotency
-    "redis[hiredis]>=7.4.0",
+    "redis[hiredis]>=8.0.0",
     # Resilience
     "tenacity>=9.0.0",
     "purgatory>=3.0.0",           # async circuit breaker
