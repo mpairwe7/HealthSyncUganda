@@ -25,7 +25,7 @@ dependencies = [
     # is async-only). Lives in main deps (not dev) because the production
     # image runs `alembic upgrade head` from inside the lifespan hook
     # when AUTO_MIGRATE=true (see app/main.py).
-    "psycopg[binary]>=3.2.0",
+    "psycopg[binary]>=3.3.4",
     # Cache / queue / idempotency
     "redis[hiredis]>=7.4.0",
     # Resilience
