@@ -76,7 +76,7 @@ jobs:
           CRANECLOUD_PROJECT_ID: ${{ secrets.CRANECLOUD_PROJECT_ID }}
 
       - name: Set up Python + install cranecloud CLI
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with: { python-version: "3.12" }
       - name: Install
         run: |
