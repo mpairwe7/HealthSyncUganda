@@ -147,7 +147,7 @@ jobs:
           fi
 
       - name: Trigger Crane Cloud rollout
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const env = '${{ steps.env.outputs.env }}';

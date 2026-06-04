@@ -425,7 +425,7 @@ jobs:
 
       - name: PR comment (when applicable)
         if: inputs.pr_number != '' && job.status == 'success'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           BE_URL: ${{ steps.update_backend.outputs.url }}
           FE_URL: ${{ steps.update_frontend.outputs.url }}
