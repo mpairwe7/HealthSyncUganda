@@ -95,7 +95,7 @@ jobs:
           CRANECLOUD_FRONTEND_APP_ID: ${{ secrets.CRANECLOUD_FRONTEND_APP_ID }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
